@@ -17,14 +17,24 @@ app = Flask(__name__)
 
 HOME = os.path.expanduser("~")
 
+# Configuration via environment variables
+HEADROOM_URL = os.environ.get("HEADROOM_URL", "http://127.0.0.1:8787")
+RTK_DB_PATH = os.environ.get("RTK_DB_PATH", os.path.join(HOME, ".local", "share", "rtk", "history.db"))
+RTK_BIN = os.environ.get("RTK_BIN", "rtk")
+JCODEMUNCH_INDEX_DIR = os.environ.get("JCODEMUNCH_INDEX_DIR", os.path.join(HOME, ".code-index"))
+JCODEMUNCH_BIN = os.environ.get("JCODEMUNCH_BIN", "jcodemunch-mcp")
+PORT = int(os.environ.get("PORT", "8095"))
+SSE_INTERVAL = int(os.environ.get("SSE_INTERVAL", "30"))
+
 # Persistent state for sparklines and fallback
 _last_good = {}
 _sparkline_buffers = {
     "rtk": deque(maxlen=60),
     "headroom": deque(maxlen=60),
     "jcodemunch": deque(maxlen=60),
-    "memstack": deque(maxlen=60),
 }
+_headroom_last_total = 0
+_headroom_history = []  # rolling buffer of recent headroom events  # last cumulative total we saw
 
 
 def _run(cmd, timeout=2):
@@ -41,7 +51,7 @@ def _run(cmd, timeout=2):
 def collect_rtk():
     """Read rtk SQLite DB and return stats + history."""
     try:
-        db_path = os.path.join(HOME, ".local", "share", "rtk", "history.db")
+        db_path = RTK_DB_PATH
         if not os.path.exists(db_path):
             return None
 
@@ -84,7 +94,7 @@ def collect_rtk():
         conn.close()
 
         # Version
-        version = _run([os.path.join(HOME, ".local", "bin", "rtk"), "--version"])
+        version = _run([RTK_BIN, "--version"])
         if version:
             version = version.strip()
 
@@ -104,13 +114,47 @@ def collect_rtk():
 def collect_headroom():
     """Check headroom proxy stats endpoint."""
     try:
-        version = _run(["headroom", "--version"])
+        # Get version from /health (fast) instead of CLI (3.6s ONNX init)
+        version = "unknown"
+        try:
+            hresp = urlopen(f"{HEADROOM_URL}/health", timeout=2)
+            hdata = json.loads(hresp.read().decode())
+            version = hdata.get("version", "unknown")
+        except (URLError, OSError, json.JSONDecodeError) as e:
+            print(f"[headroom] /health failed: {e}", flush=True)
 
         try:
-            resp = urlopen("http://127.0.0.1:8787/stats", timeout=2)
+            resp = urlopen(f"{HEADROOM_URL}/stats", timeout=2)
             data = json.loads(resp.read().decode())
+
+            # Map nested headroom fields to the flat names the frontend expects
+            savings = data.get("savings", {})
+            tokens = data.get("tokens", {})
+            cache = data.get("compression_cache", {})
+
             data["active"] = True
             data["version"] = version or "unknown"
+            # Use compression-only savings (not savings.total_tokens which includes RTK)
+            data["total_saved"] = tokens.get("saved", 0)
+            data["sessions"] = cache.get("active_sessions", 0)
+            data["avg_savings_pct"] = round(tokens.get("savings_percent", 0), 1)
+
+            # Accumulate headroom events in a rolling buffer
+            global _headroom_last_total, _headroom_history
+            current_total = data["total_saved"]
+            if _headroom_last_total > 0 and current_total > _headroom_last_total:
+                delta = current_total - _headroom_last_total
+                _headroom_history.append({
+                    "time": datetime.now(timezone.utc).isoformat(),
+                    "tool": "headroom",
+                    "cmd": f"compressed {delta:,} tokens",
+                    "saved_tokens": delta,
+                    "saved_pct": data["avg_savings_pct"],
+                })
+                _headroom_history = _headroom_history[-20:]  # keep last 20
+            _headroom_last_total = current_total
+            data["history"] = list(_headroom_history)
+
             return data
         except (URLError, OSError, json.JSONDecodeError):
             return {
@@ -124,7 +168,7 @@ def collect_headroom():
 def collect_jcodemunch():
     """Read jcodemunch savings and index stats."""
     try:
-        savings_path = os.path.join(HOME, ".code-index", "_savings.json")
+        savings_path = os.path.join(JCODEMUNCH_INDEX_DIR, "_savings.json")
         total_tokens_saved = 0
         if os.path.exists(savings_path):
             with open(savings_path) as f:
@@ -132,54 +176,19 @@ def collect_jcodemunch():
             total_tokens_saved = data.get("total_tokens_saved", 0)
 
         # Count .db files and sum sizes
-        index_dir = os.path.join(HOME, ".code-index")
+        index_dir = JCODEMUNCH_INDEX_DIR
         db_files = glob.glob(os.path.join(index_dir, "*.db"))
         repos_indexed = len(db_files)
         index_size_bytes = sum(os.path.getsize(f) for f in db_files if os.path.exists(f))
         index_size_mb = round(index_size_bytes / (1024 * 1024), 1)
 
-        version = _run(["jcodemunch-mcp", "--version"])
+        version = _run([JCODEMUNCH_BIN, "--version"])
 
         return {
             "active": True,
             "total_saved": total_tokens_saved,
             "repos_indexed": repos_indexed,
             "index_size_mb": index_size_mb,
-            "version": version or "unknown",
-        }
-    except Exception:
-        return None
-
-
-def collect_memstack():
-    """Run memstack stats command and count skills."""
-    try:
-        db_script = os.path.join(HOME, ".claude", "skills", "db", "memstack-db.py")
-        output = _run(["python3", db_script, "stats"])
-        if output:
-            stats = json.loads(output)
-        else:
-            stats = {}
-
-        # Count .md files in skills directory
-        skills_dir = os.path.join(HOME, ".claude", "skills", "skills")
-        skills_count = 0
-        if os.path.isdir(skills_dir):
-            for _root, _dirs, files in os.walk(skills_dir):
-                skills_count += sum(1 for f in files if f.endswith(".md"))
-
-        version = _run(
-            ["git", "-C", os.path.join(HOME, ".claude", "skills"),
-             "describe", "--tags", "--always"]
-        )
-
-        return {
-            "active": True,
-            "sessions": stats.get("sessions", 0),
-            "insights": stats.get("insights", 0),
-            "projects": stats.get("projects", 0),
-            "skills": skills_count,
-            "db_size_kb": stats.get("db_size_kb", 0),
             "version": version or "unknown",
         }
     except Exception:
@@ -194,7 +203,6 @@ def collect_all():
         "rtk": collect_rtk,
         "headroom": collect_headroom,
         "jcodemunch": collect_jcodemunch,
-        "memstack": collect_memstack,
     }
 
     results = {}
@@ -245,6 +253,8 @@ def collect_all():
     history = []
     if "history" in results.get("rtk", {}):
         history.extend(results["rtk"]["history"])
+    if "history" in results.get("headroom", {}):
+        history.extend(results["headroom"]["history"])
 
     # Sort by time descending, limit to 20
     history.sort(key=lambda x: x.get("time", ""), reverse=True)
@@ -258,7 +268,6 @@ def collect_all():
         "rtk": results["rtk"],
         "headroom": results["headroom"],
         "jcodemunch": results["jcodemunch"],
-        "memstack": results["memstack"],
         "sparklines": sparklines,
         "history": history,
     }
@@ -274,6 +283,7 @@ HTML = """<!DOCTYPE html>
 <title>Claude Tools Dashboard</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html { height: 100%; }
 body {
     background: #0a0a1a;
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Courier New', monospace;
@@ -282,6 +292,10 @@ body {
     -webkit-font-smoothing: antialiased;
     color: #ccc;
     padding: 24px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
 /* Header */
@@ -331,7 +345,7 @@ body {
 /* Cards grid */
 .cards {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 12px;
     margin-bottom: 12px;
 }
@@ -355,7 +369,9 @@ body {
     letter-spacing: 2px;
     font-weight: bold;
     color: #999;
+    text-decoration: none;
 }
+.card-name:hover { color: #fff; }
 .card-version {
     color: #555;
     font-size: 11px;
@@ -420,16 +436,15 @@ body {
 .stroke-jcodemunch { stroke: #ff9f43; }
 .area-jcodemunch { fill: rgba(255, 159, 67, 0.1); }
 
-.clr-memstack { color: #a855f7; }
-.fill-memstack { background: #a855f7; }
-.stroke-memstack { stroke: #a855f7; }
-.area-memstack { fill: rgba(168, 85, 247, 0.1); }
-
 /* Feed */
 .feed-container {
     background: #111;
     border: 1px solid #1a1a2e;
     border-radius: 4px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
 .feed-header {
     display: flex;
@@ -450,8 +465,9 @@ body {
     font-size: 12px;
 }
 .feed-area {
-    height: 220px;
-    overflow: hidden;
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
     font-size: 13px;
     line-height: 2.1;
     padding: 10px 16px;
@@ -511,7 +527,7 @@ body {
     <!-- RTK -->
     <div class="card" id="rtk-card">
         <div class="card-header">
-            <span class="card-name">RTK</span>
+            <a href="https://github.com/reachingforthejack/rtk" target="_blank" class="card-name">RTK</a>
             <span class="card-version" id="rtk-version">--</span>
         </div>
         <div class="card-value clr-rtk" id="rtk-value">--</div>
@@ -527,7 +543,7 @@ body {
     <!-- Headroom -->
     <div class="card" id="headroom-card">
         <div class="card-header">
-            <span class="card-name">Headroom</span>
+            <a href="https://github.com/chopratejas/headroom" target="_blank" class="card-name">Headroom</a>
             <span class="card-version" id="headroom-version">--</span>
         </div>
         <div class="card-value clr-headroom" id="headroom-value">--</div>
@@ -543,7 +559,7 @@ body {
     <!-- jCodeMunch -->
     <div class="card" id="jcodemunch-card">
         <div class="card-header">
-            <span class="card-name">jCodeMunch</span>
+            <a href="https://github.com/jgravelle/jcodemunch-mcp" target="_blank" class="card-name">jCodeMunch</a>
             <span class="card-version" id="jcodemunch-version">--</span>
         </div>
         <div class="card-value clr-jcodemunch" id="jcodemunch-value">--</div>
@@ -556,21 +572,6 @@ body {
         <div class="card-delta" id="jcodemunch-delta"></div>
     </div>
 
-    <!-- MemStack -->
-    <div class="card" id="memstack-card">
-        <div class="card-header">
-            <span class="card-name">MemStack</span>
-            <span class="card-version" id="memstack-version">--</span>
-        </div>
-        <div class="card-value clr-memstack" id="memstack-value">--</div>
-        <div class="card-sub" id="memstack-sub">sessions tracked</div>
-        <div class="progress-track"><div class="progress-fill fill-memstack" id="memstack-bar" style="width:0%"></div></div>
-        <div class="card-stats" id="memstack-stats">
-            <span><span class="label">skills</span> <span class="val">--</span></span>
-        </div>
-        <div class="sparkline-container"><svg id="memstack-sparkline" viewBox="0 0 200 35" preserveAspectRatio="none"></svg></div>
-        <div class="card-delta" id="memstack-delta"></div>
-    </div>
 </div>
 
 <!-- Activity Feed -->
@@ -611,12 +612,11 @@ function shortVersion(v) {
     return parts[parts.length - 1];
 }
 
-var TOOLS = ['rtk', 'headroom', 'jcodemunch', 'memstack'];
+var TOOLS = ['rtk', 'headroom', 'jcodemunch'];
 var TOOL_COLOURS = {
     rtk: '#00ff88',
     headroom: '#00bfff',
-    jcodemunch: '#ff9f43',
-    memstack: '#a855f7'
+    jcodemunch: '#ff9f43'
 };
 
 function renderSparkline(svgEl, points, tool) {
@@ -701,20 +701,6 @@ function updateDashboard(d) {
         document.getElementById('jcodemunch-stats').innerHTML =
             '<span><span class="label">repos</span> <span class="val">' + (jc.repos_indexed || 0) + '</span></span>' +
             '<span><span class="label">indexed</span> <span class="val">' + (jc.index_size_mb || 0) + 'MB</span></span>';
-    }
-
-    // MemStack
-    var ms = d.memstack || {};
-    var msCard = document.getElementById('memstack-card');
-    msCard.className = ms.active ? 'card' : 'card inactive';
-    document.getElementById('memstack-version').textContent = shortVersion(ms.version);
-    document.getElementById('memstack-value').textContent = ms.active ? (ms.sessions || 0) : '--';
-    document.getElementById('memstack-sub').textContent = 'sessions tracked';
-    document.getElementById('memstack-bar').style.width = '0%';
-    if (ms.active) {
-        document.getElementById('memstack-stats').innerHTML =
-            '<span><span class="label">skills</span> <span class="val">' + (ms.skills || 0) + '</span></span>' +
-            '<span><span class="label">db</span> <span class="val">' + (ms.db_size_kb || 0) + 'KB</span></span>';
     }
 
     // Sparklines
@@ -822,7 +808,7 @@ def events():
         while True:
             payload = collect_all()
             yield f"data: {json.dumps(payload)}\n\n"
-            time.sleep(30)
+            time.sleep(SSE_INTERVAL)
 
     return Response(
         stream(),
@@ -835,4 +821,4 @@ def events():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=62891, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
