@@ -36,6 +36,7 @@ _sparkline_buffers = {
 _headroom_last_total = 0
 _headroom_history = []
 _jcodemunch_last_total = 0
+_jcodemunch_last_mtime = 0
 _jcodemunch_history = []
 
 
@@ -186,17 +187,23 @@ def collect_jcodemunch():
 
         version = _run([JCODEMUNCH_BIN, "--version"])
 
-        global _jcodemunch_last_total, _jcodemunch_history
-        if _jcodemunch_last_total > 0 and total_tokens_saved > _jcodemunch_last_total:
+        # Detect changes via file mtime + content delta.
+        # jCodeMunch flushes _savings.json periodically, not on every call,
+        # so we check mtime to avoid missing updates between polls.
+        global _jcodemunch_last_total, _jcodemunch_last_mtime, _jcodemunch_history
+        savings_path = os.path.join(JCODEMUNCH_INDEX_DIR, "_savings.json")
+        cur_mtime = os.path.getmtime(savings_path) if os.path.exists(savings_path) else 0
+        if cur_mtime > _jcodemunch_last_mtime and _jcodemunch_last_total > 0 and total_tokens_saved > _jcodemunch_last_total:
             delta = total_tokens_saved - _jcodemunch_last_total
             _jcodemunch_history.append({
                 "time": datetime.now(timezone.utc).isoformat(),
                 "tool": "jcodemunch",
-                "cmd": f"saved {delta:,} tokens",
+                "cmd": f"indexed query saved {delta:,} tokens",
                 "saved_tokens": delta,
                 "saved_pct": 0,
             })
             _jcodemunch_history = _jcodemunch_history[-20:]
+        _jcodemunch_last_mtime = cur_mtime
         _jcodemunch_last_total = total_tokens_saved
 
         return {
@@ -301,7 +308,7 @@ HTML = """<!DOCTYPE html>
 <title>Claude Tools Dashboard</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html { height: 100%; }
+html, body { height: 100%; overflow: hidden; }
 body {
     background: #0a0a1a;
     font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Courier New', monospace;
@@ -310,10 +317,8 @@ body {
     -webkit-font-smoothing: antialiased;
     color: #ccc;
     padding: 24px;
-    height: 100%;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
 }
 
 /* Header */
