@@ -190,23 +190,33 @@ def collect_jcodemunch():
 
         version = _run([JCODEMUNCH_BIN, "--version"])
 
-        # Detect changes via file mtime + content delta.
-        # jCodeMunch flushes _savings.json periodically, not on every call,
-        # so we check mtime to avoid missing updates between polls.
+        # Detect activity via newest .db file mtime (updated on every query/index).
+        # _savings.json only flushes on actual token savings, so it misses queries.
         global _jcodemunch_last_total, _jcodemunch_last_mtime, _jcodemunch_history
-        savings_path = os.path.join(JCODEMUNCH_INDEX_DIR, "_savings.json")
-        cur_mtime = os.path.getmtime(savings_path) if os.path.exists(savings_path) else 0
-        if cur_mtime > _jcodemunch_last_mtime and _jcodemunch_last_total > 0 and total_tokens_saved > _jcodemunch_last_total:
-            delta = total_tokens_saved - _jcodemunch_last_total
-            _jcodemunch_history.append({
-                "time": datetime.now(timezone.utc).isoformat(),
-                "tool": "jcodemunch",
-                "cmd": f"indexed query saved {delta:,} tokens",
-                "saved_tokens": delta,
-                "saved_pct": 0,
-            })
+        newest_db_mtime = max(
+            (os.path.getmtime(f) for f in db_files),
+            default=0,
+        )
+        if newest_db_mtime > _jcodemunch_last_mtime and _jcodemunch_last_mtime > 0:
+            if total_tokens_saved > _jcodemunch_last_total and _jcodemunch_last_total > 0:
+                delta = total_tokens_saved - _jcodemunch_last_total
+                _jcodemunch_history.append({
+                    "time": datetime.now(timezone.utc).isoformat(),
+                    "tool": "jcodemunch",
+                    "cmd": f"indexed/queried -- saved {delta:,} tokens",
+                    "saved_tokens": delta,
+                    "saved_pct": 0,
+                })
+            else:
+                _jcodemunch_history.append({
+                    "time": datetime.now(timezone.utc).isoformat(),
+                    "tool": "jcodemunch",
+                    "cmd": f"query across {repos_indexed} repos ({index_size_mb}MB indexed)",
+                    "saved_tokens": 0,
+                    "saved_pct": 0,
+                })
             _jcodemunch_history = _jcodemunch_history[-20:]
-        _jcodemunch_last_mtime = cur_mtime
+        _jcodemunch_last_mtime = newest_db_mtime
         _jcodemunch_last_total = total_tokens_saved
 
         return {
