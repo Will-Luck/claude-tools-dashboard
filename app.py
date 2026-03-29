@@ -11,7 +11,10 @@ from datetime import datetime, timezone
 from urllib.request import urlopen
 from urllib.error import URLError
 
+from dotenv import load_dotenv
 from flask import Flask, Response, jsonify
+
+load_dotenv()
 
 app = Flask(__name__)
 
@@ -23,7 +26,7 @@ RTK_DB_PATH = os.environ.get("RTK_DB_PATH", os.path.join(HOME, ".local", "share"
 RTK_BIN = os.environ.get("RTK_BIN", "rtk")
 JCODEMUNCH_INDEX_DIR = os.environ.get("JCODEMUNCH_INDEX_DIR", os.path.join(HOME, ".code-index"))
 JCODEMUNCH_BIN = os.environ.get("JCODEMUNCH_BIN", "jcodemunch-mcp")
-PORT = int(os.environ.get("PORT", "62891"))
+PORT = int(os.environ.get("PORT", "8095"))
 SSE_INTERVAL = int(os.environ.get("SSE_INTERVAL", "30"))
 
 # Persistent state for sparklines and fallback

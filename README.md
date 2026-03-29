@@ -25,7 +25,7 @@ git clone <repo-url>
 cd claude-tools-dashboard
 pip install -r requirements.txt
 python app.py
-# Open http://localhost:62891
+# Open http://localhost:8095
 ```
 
 ### Docker
@@ -33,7 +33,7 @@ python app.py
 ```bash
 docker build -t claude-tools-dashboard .
 docker run -d --name claude-tools-dashboard \
-  -p 62891:62891 \
+  -p 8095:8095 \
   -v ~/.local/share/rtk:/root/.local/share/rtk:ro \
   -v ~/.code-index:/root/.code-index:ro \
   --network host \
@@ -48,7 +48,7 @@ All settings via environment variables. Copy `.env.example` for reference:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `62891` | Dashboard listen port |
+| `PORT` | `8095` | Dashboard listen port |
 | `HEADROOM_URL` | `http://127.0.0.1:8787` | Headroom proxy stats endpoint |
 | `RTK_DB_PATH` | `~/.local/share/rtk/history.db` | RTK SQLite database |
 | `RTK_BIN` | `rtk` | Path to RTK binary |
