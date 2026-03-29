@@ -490,11 +490,14 @@ body {
 .feed-area {
     flex: 1;
     overflow-y: auto;
+    scrollbar-width: none;          /* Firefox */
+    -ms-overflow-style: none;       /* IE/Edge */
     min-height: 0;
     font-size: 13px;
     line-height: 2.1;
     padding: 10px 16px;
 }
+.feed-area::-webkit-scrollbar { display: none; }  /* Chrome/Safari */
 .feed-line {
     display: flex;
     gap: 16px;
