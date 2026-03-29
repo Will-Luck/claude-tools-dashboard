@@ -195,14 +195,11 @@ def collect_jcodemunch():
 
         version = _run([JCODEMUNCH_BIN, "--version"])
 
-        # Detect activity via newest .db file mtime (updated on every query/index).
-        # _savings.json only flushes on actual token savings, so it misses queries.
+        # Detect activity via session_stats.json mtime (updated on every MCP call).
         global _jcodemunch_last_total, _jcodemunch_last_mtime, _jcodemunch_history
-        newest_db_mtime = max(
-            (os.path.getmtime(f) for f in db_files),
-            default=0,
-        )
-        if newest_db_mtime > _jcodemunch_last_mtime and _jcodemunch_last_mtime > 0:
+        stats_path = os.path.join(index_dir, "session_stats.json")
+        stats_mtime = os.path.getmtime(stats_path) if os.path.exists(stats_path) else 0
+        if stats_mtime > _jcodemunch_last_mtime and _jcodemunch_last_mtime > 0:
             if total_tokens_saved > _jcodemunch_last_total and _jcodemunch_last_total > 0:
                 delta = total_tokens_saved - _jcodemunch_last_total
                 _jcodemunch_history.append({
@@ -221,7 +218,7 @@ def collect_jcodemunch():
                     "saved_pct": 0,
                 })
             _jcodemunch_history = _jcodemunch_history[-20:]
-        _jcodemunch_last_mtime = newest_db_mtime
+        _jcodemunch_last_mtime = stats_mtime
         _jcodemunch_last_total = total_tokens_saved
 
         return {
