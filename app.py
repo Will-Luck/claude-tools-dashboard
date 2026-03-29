@@ -23,7 +23,7 @@ RTK_DB_PATH = os.environ.get("RTK_DB_PATH", os.path.join(HOME, ".local", "share"
 RTK_BIN = os.environ.get("RTK_BIN", "rtk")
 JCODEMUNCH_INDEX_DIR = os.environ.get("JCODEMUNCH_INDEX_DIR", os.path.join(HOME, ".code-index"))
 JCODEMUNCH_BIN = os.environ.get("JCODEMUNCH_BIN", "jcodemunch-mcp")
-PORT = int(os.environ.get("PORT", "8095"))
+PORT = int(os.environ.get("PORT", "62891"))
 SSE_INTERVAL = int(os.environ.get("SSE_INTERVAL", "30"))
 
 # Persistent state for sparklines and fallback
