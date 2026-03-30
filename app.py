@@ -30,6 +30,8 @@ JDOCMUNCH_INDEX_DIR = os.environ.get("JDOCMUNCH_INDEX_DIR", os.path.join(HOME, "
 JDOCMUNCH_BIN = os.environ.get("JDOCMUNCH_BIN", "jdocmunch-mcp")
 PORT = int(os.environ.get("PORT", "8095"))
 SSE_INTERVAL = int(os.environ.get("SSE_INTERVAL", "30"))
+CCSTATUSLINE_CACHE = os.environ.get("CCSTATUSLINE_CACHE", os.path.join(HOME, ".cache", "ccstatusline", "usage.json"))
+WEEKLY_CACHE_DIR = os.environ.get("WEEKLY_CACHE_DIR", os.path.join(HOME, ".cache", "claude-tools-dashboard"))
 
 # Persistent state for sparklines and fallback
 _last_good = {}
@@ -311,6 +313,48 @@ def collect_jdocmunch():
         return None
 
 
+def collect_claude_usage():
+    """Read ccstatusline cache for Claude usage data."""
+    try:
+        if not os.path.exists(CCSTATUSLINE_CACHE):
+            return None
+        # Stale if older than 10 minutes
+        age = time.time() - os.path.getmtime(CCSTATUSLINE_CACHE)
+        if age > 600:
+            return None
+        with open(CCSTATUSLINE_CACHE) as f:
+            data = json.load(f)
+        return {
+            "session_pct": data.get("sessionUsage"),
+            "session_reset": data.get("sessionResetAt"),
+            "weekly_pct": data.get("weeklyUsage"),
+            "weekly_reset": data.get("weeklyResetAt"),
+            "active": True,
+        }
+    except Exception:
+        return None
+
+
+def _load_weekly_cache():
+    """Load weekly savings snapshot from disk."""
+    path = os.path.join(WEEKLY_CACHE_DIR, "weekly.json")
+    try:
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_weekly_cache(data):
+    """Save weekly savings snapshot to disk."""
+    os.makedirs(WEEKLY_CACHE_DIR, exist_ok=True)
+    path = os.path.join(WEEKLY_CACHE_DIR, "weekly.json")
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
 def collect_all():
     """Collect from all tools, maintain sparklines and fallbacks."""
     global _last_good
@@ -336,6 +380,55 @@ def collect_all():
     for name in collectors:
         tool_data = results[name]
         combined_saved += tool_data.get("total_saved", 0)
+
+    # Weekly savings tracking
+    claude_usage = collect_claude_usage()
+    weekly_data = _load_weekly_cache()
+
+    if claude_usage and claude_usage.get("weekly_reset"):
+        fresh_reset = claude_usage["weekly_reset"]
+        stored_reset = weekly_data.get("weekly_reset_at", "")
+
+        # Reset has moved forward -- rotate weeks
+        if fresh_reset != stored_reset and stored_reset:
+            baseline = weekly_data.get("current_week_baseline", 0)
+            weekly_data["last_week_savings"] = combined_saved - baseline
+            weekly_data["last_week_end"] = stored_reset
+            weekly_data["current_week_baseline"] = combined_saved
+            weekly_data["current_week_start"] = stored_reset
+            weekly_data["weekly_reset_at"] = fresh_reset
+            _save_weekly_cache(weekly_data)
+        elif not stored_reset:
+            # First run -- set baseline
+            weekly_data["current_week_baseline"] = combined_saved
+            weekly_data["current_week_start"] = datetime.now(timezone.utc).isoformat()
+            weekly_data["weekly_reset_at"] = fresh_reset
+            weekly_data["last_week_savings"] = 0
+            _save_weekly_cache(weekly_data)
+
+    this_week_savings = combined_saved - weekly_data.get("current_week_baseline", combined_saved)
+    last_week_savings = weekly_data.get("last_week_savings", 0)
+
+    # Burn rate: savings per day this week
+    week_start = weekly_data.get("current_week_start")
+    if week_start:
+        try:
+            start_dt = datetime.fromisoformat(week_start)
+            elapsed_days = max(1.0, (datetime.now(timezone.utc) - start_dt).total_seconds() / 86400)
+            burn_rate_daily = int(this_week_savings / elapsed_days)
+        except (ValueError, TypeError):
+            burn_rate_daily = 0
+    else:
+        burn_rate_daily = 0
+
+    # Format reset display: "Thu 3 Apr 15:00"
+    reset_display = ""
+    if claude_usage and claude_usage.get("weekly_reset"):
+        try:
+            reset_dt = datetime.fromisoformat(claude_usage["weekly_reset"])
+            reset_display = reset_dt.strftime("%a %-d %b %H:%M")
+        except (ValueError, TypeError):
+            reset_display = ""
 
     # Update sparkline buffers with cumulative totals
     now = time.time()
@@ -394,6 +487,13 @@ def collect_all():
         "jdocmunch": results["jdocmunch"],
         "sparklines": sparklines,
         "history": history,
+        "claude_usage": claude_usage or {"active": False},
+        "weekly": {
+            "this_week": this_week_savings,
+            "last_week": last_week_savings,
+            "burn_rate_daily": burn_rate_daily,
+            "reset_display": reset_display,
+        },
     }
 
 
