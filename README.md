@@ -20,7 +20,7 @@ Live wallboard for monitoring token savings across your Claude Code toolchain. T
 
 ```bash
 # Clone and run locally
-git clone <repo-url>
+git clone https://github.com/Will-Luck/claude-tools-dashboard.git
 cd claude-tools-dashboard
 pip install -r requirements.txt
 python app.py
