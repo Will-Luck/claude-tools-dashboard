@@ -439,6 +439,15 @@ def collect_all():
     else:
         burn_rate_daily = 0
 
+    # Flag fresh tracker (started <1hr ago with 0 savings)
+    week_is_fresh = False
+    if this_week_savings == 0 and week_start:
+        try:
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(week_start)).total_seconds()
+            week_is_fresh = elapsed < 3600
+        except (ValueError, TypeError):
+            pass
+
     # Format reset display: "Thu 3 Apr 15:00"
     reset_display = ""
     if claude_usage and claude_usage.get("weekly_reset"):
@@ -511,6 +520,7 @@ def collect_all():
             "last_week": last_week_savings,
             "burn_rate_daily": burn_rate_daily,
             "reset_display": reset_display,
+            "week_is_fresh": week_is_fresh,
         },
     }
 
@@ -523,6 +533,7 @@ HTML = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Claude Tools Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { height: 100%; overflow: hidden; }
@@ -761,13 +772,12 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+    flex-wrap: wrap;
+    gap: 4px 6px;
     padding: 6px 0;
     margin-bottom: 16px;
     font-size: 12px;
     color: #889;
-    overflow: hidden;
-    white-space: nowrap;
 }
 .ticker .sep {
     color: #556;
@@ -779,6 +789,13 @@ body {
 .ticker .pct-green { color: #00ff88; }
 .ticker .pct-yellow { color: #ffcc00; }
 .ticker .pct-red { color: #ff4444; }
+@media (max-width: 600px) {
+    .ticker { font-size: 11px; gap: 3px 5px; }
+    .header { flex-wrap: wrap; justify-content: center; gap: 4px; }
+    .header-left { width: 100%; justify-content: center; }
+    .header-centre { font-size: 12px; }
+    .header-right { font-size: 12px; }
+}
 </style>
 </head>
 <body>
@@ -967,9 +984,9 @@ function updateDashboard(d) {
     // Ticker
     var w = d.weekly || {};
     var cu = d.claude_usage || {};
-    document.getElementById('tk-this-week').textContent = w.this_week != null ? formatTokens(w.this_week, true) : '--';
+    document.getElementById('tk-this-week').textContent = w.week_is_fresh ? '--' : (w.this_week != null ? formatTokens(w.this_week, true) : '--');
     document.getElementById('tk-last-week').textContent = w.last_week ? formatTokens(w.last_week, true) : '--';
-    document.getElementById('tk-burn').textContent = w.burn_rate_daily ? formatTokens(w.burn_rate_daily, true) : '--';
+    document.getElementById('tk-burn').textContent = w.burn_rate_daily != null ? (w.burn_rate_daily === 0 ? '0' : formatTokens(w.burn_rate_daily, true)) : '--';
     document.getElementById('tk-reset').textContent = w.reset_display || '--';
 
     var sessionEl = document.getElementById('tk-session-pct');
@@ -1132,7 +1149,7 @@ source.onmessage = function(e) {
     }
 };
 source.onerror = function() {
-    console.warn('SSE connection lost, will retry...');
+    console.debug('SSE connection lost, will retry...');
 };
 </script>
 </body>
