@@ -866,9 +866,10 @@ body {
 </div>
 
 <script>
-function formatTokens(n) {
+function formatTokens(n, withUnit) {
     if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
     if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    if (withUnit) return n + ' tokens';
     return String(n);
 }
 
@@ -947,9 +948,9 @@ function updateDashboard(d) {
     // Ticker
     var w = d.weekly || {};
     var cu = d.claude_usage || {};
-    document.getElementById('tk-this-week').textContent = w.this_week != null ? formatTokens(w.this_week) : '--';
-    document.getElementById('tk-last-week').textContent = w.last_week ? formatTokens(w.last_week) : '--';
-    document.getElementById('tk-burn').textContent = w.burn_rate_daily ? formatTokens(w.burn_rate_daily) : '--';
+    document.getElementById('tk-this-week').textContent = w.this_week != null ? formatTokens(w.this_week, true) : '--';
+    document.getElementById('tk-last-week').textContent = w.last_week ? formatTokens(w.last_week, true) : '--';
+    document.getElementById('tk-burn').textContent = w.burn_rate_daily ? formatTokens(w.burn_rate_daily, true) : '--';
     document.getElementById('tk-reset').textContent = w.reset_display || '--';
 
     var sessionEl = document.getElementById('tk-session-pct');
