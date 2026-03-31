@@ -746,12 +746,12 @@ body {
     padding: 6px 0;
     margin-bottom: 16px;
     font-size: 12px;
-    color: #555;
+    color: #889;
     overflow: hidden;
     white-space: nowrap;
 }
 .ticker .sep {
-    color: #2a2a3e;
+    color: #556;
 }
 .ticker .tv {
     color: #00bfff;
