@@ -833,6 +833,7 @@ body {
     .header-left { width: 100%; justify-content: center; }
     .header-centre { font-size: 12px; }
     .header-right { font-size: 12px; }
+    html, body { overflow: auto; height: auto; }
 }
 </style>
 </head>
