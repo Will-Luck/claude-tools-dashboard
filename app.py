@@ -874,6 +874,19 @@ body {
 .feed-savings.positive { color: #00ff88; }
 .feed-savings.zero { color: #444; }
 .feed-savings.info { color: #888; }
+.feed-line.muted {
+    font-size: 12px;
+    opacity: 0.6;
+}
+.feed-line.highlight {
+    border-left: 2px solid;
+    padding-left: 14px;
+}
+.feed-line.grouped {
+    border-left: 2px solid;
+    padding-left: 14px;
+    font-style: italic;
+}
 
 @media (max-width: 1000px) {
     .cards { grid-template-columns: repeat(2, 1fr); }
@@ -1232,8 +1245,17 @@ function updateDashboard(d) {
         } else {
             savingsText = formatTokens(h.saved_tokens || 0) + ' tokens';
         }
+        var lineClasses = 'feed-line';
+        if (h.saved_tokens === 0 && (h.saved_pct === 0 || !h.saved_pct)) {
+            lineClasses += ' muted';
+        } else if (h.saved_tokens > 1000) {
+            lineClasses += ' highlight';
+        }
+        if (h.grouped) {
+            lineClasses += ' grouped';
+        }
         lines.push(
-            '<div class="feed-line">' +
+            '<div class="' + lineClasses + '"' + (lineClasses.indexOf('highlight') >= 0 || lineClasses.indexOf('grouped') >= 0 ? ' style="border-color:' + toolClr + '"' : '') + '>' +
             '<span class="feed-time">' + shortTime(h.time) + '</span>' +
             '<span class="feed-tool" style="color:' + toolClr + '">' + (h.tool || '') + '</span>' +
             '<span class="feed-cmd">' + escHtml(h.cmd || '') + '</span>' +
