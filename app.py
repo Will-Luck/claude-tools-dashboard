@@ -870,7 +870,7 @@ body {
     <!-- RTK -->
     <div class="card" id="rtk-card">
         <div class="card-header">
-            <a href="https://github.com/reachingforthejack/rtk" target="_blank" class="card-name">RTK</a>
+            <a href="https://github.com/rtk-ai/rtk" target="_blank" class="card-name">RTK</a>
             <span class="card-version" id="rtk-version">--</span>
         </div>
         <div class="card-value clr-rtk" id="rtk-value">--</div>
