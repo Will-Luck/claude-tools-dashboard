@@ -481,7 +481,7 @@ def _save_weekly_cache(data):
 
 
 def _group_history(entries):
-    """Collapse consecutive same-tool, same-prefix entries within 30s."""
+    """Collapse consecutive same-tool, same-prefix entries within 10s."""
     if not entries:
         return entries
 
@@ -501,7 +501,7 @@ def _group_history(entries):
         tool = entry.get("tool", "")
         entry_time = entry.get("time", "")
 
-        # Collect consecutive entries with same tool + prefix within 30s
+        # Collect consecutive entries with same tool + prefix within 10s
         batch = [entry]
         j = i + 1
         while j < len(entries):
@@ -520,7 +520,7 @@ def _group_history(entries):
             try:
                 t1 = datetime.fromisoformat(entry_time)
                 t2 = datetime.fromisoformat(next_entry.get("time", ""))
-                if abs((t1 - t2).total_seconds()) > 30:
+                if abs((t1 - t2).total_seconds()) > 10:
                     break
             except (ValueError, TypeError):
                 break
@@ -692,8 +692,9 @@ def collect_all():
     if "history" in results.get("jdocmunch", {}):
         history.extend(results["jdocmunch"]["history"])
 
-    # Sort by time descending, limit to 100
+    # Sort by time descending, collapse bursts, limit to 100
     history.sort(key=lambda x: x.get("time", ""), reverse=True)
+    history = _group_history(history)
     history = history[:100]
 
     timestamp = datetime.now(timezone.utc).isoformat()
