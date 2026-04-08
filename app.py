@@ -149,10 +149,10 @@ def collect_rtk():
         avg_savings_pct = round(row["avg_pct"], 1)
         total_time_ms = row["total_time"]
 
-        # Last 20 entries for history
+        # Last 100 entries for history
         cur.execute(
             "SELECT timestamp, original_cmd, saved_tokens, savings_pct "
-            "FROM commands ORDER BY id DESC LIMIT 20"
+            "FROM commands ORDER BY id DESC LIMIT 100"
         )
         history = []
         for r in cur.fetchall():
@@ -227,7 +227,7 @@ def collect_headroom():
                     "saved_tokens": delta,
                     "saved_pct": data["avg_savings_pct"],
                 })
-                _headroom_history = _headroom_history[-20:]  # keep last 20
+                _headroom_history = _headroom_history[-100:]  # keep last 100
             _headroom_last_total = current_total
             data["history"] = list(_headroom_history)
 
@@ -286,7 +286,7 @@ def collect_jcodemunch():
                     "saved_tokens": 0,
                     "saved_pct": 0,
                 })
-            _jcodemunch_history = _jcodemunch_history[-20:]
+            _jcodemunch_history = _jcodemunch_history[-100:]
         _jcodemunch_last_mtime = stats_mtime
         _jcodemunch_last_total = total_tokens_saved
 
@@ -370,8 +370,7 @@ def collect_jdocmunch():
                     "saved_tokens": 0,
                     "saved_pct": 0,
                 })
-            if len(_jdocmunch_history) > 20:
-                _jdocmunch_history.pop(0)
+            _jdocmunch_history = _jdocmunch_history[-100:]
         _jdocmunch_last_mtime = newest_mtime
         _jdocmunch_last_total = total_tokens_saved
 
@@ -693,9 +692,9 @@ def collect_all():
     if "history" in results.get("jdocmunch", {}):
         history.extend(results["jdocmunch"]["history"])
 
-    # Sort by time descending, limit to 20
+    # Sort by time descending, limit to 100
     history.sort(key=lambda x: x.get("time", ""), reverse=True)
-    history = history[:20]
+    history = history[:100]
 
     timestamp = datetime.now(timezone.utc).isoformat()
 
