@@ -973,14 +973,26 @@ body {
 .feed-area {
     flex: 1;
     overflow-y: auto;
-    scrollbar-width: none;          /* Firefox */
-    -ms-overflow-style: none;       /* IE/Edge */
+    scrollbar-width: thin;          /* Firefox */
+    scrollbar-color: #2a2a2a #0a0a0a;
     min-height: 0;
     font-size: 13px;
     line-height: 2.1;
     padding: 10px 16px;
 }
-.feed-area::-webkit-scrollbar { display: none; }  /* Chrome/Safari */
+.feed-area::-webkit-scrollbar {
+    width: 6px;
+}
+.feed-area::-webkit-scrollbar-track {
+    background: #0a0a0a;
+}
+.feed-area::-webkit-scrollbar-thumb {
+    background: #2a2a2a;
+    border-radius: 3px;
+}
+.feed-area::-webkit-scrollbar-thumb:hover {
+    background: #3a3a3a;
+}
 .feed-line {
     display: flex;
     gap: 16px;
