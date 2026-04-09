@@ -109,6 +109,12 @@ _SECRET_PATTERNS = [
     (re.compile(r'((?:-e|--env)\s+\S*=)\S+'), r'\1***'),
     (re.compile(r'(\b\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PASSWD)\s*=)\S+', re.IGNORECASE), r'\1***'),
     (re.compile(r'sk-ant-[A-Za-z0-9_-]{8,}'), 'sk-ant-***'),
+    # HTTP Authorization header with scheme (token, Bearer, Basic)
+    (re.compile(r'([Aa]uthorization:\s*(?:[Tt]oken|[Bb]earer|[Bb]asic)\s+)\S+'), r'\1***'),
+    # Custom X-*-Key or X-*-Token headers (X-API-Key, X-Auth-Token, etc.)
+    (re.compile(r'(\b[Xx]-[\w-]*(?:[Kk]ey|[Tt]oken):\s*)\S+'), r'\1***'),
+    # curl -u user:password
+    (re.compile(r'(\s-u\s+[^\s:]+:)\S+'), r'\1***'),
 ]
 
 
