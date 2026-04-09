@@ -267,11 +267,17 @@ def collect_jcodemunch():
 
         version = _cached_versions.get("jcodemunch") or "unknown"
 
-        # Detect activity via session_stats.json mtime (updated on every MCP call).
+        # Detect activity via the newest mtime across session_stats.json, _savings.json,
+        # and all per-repo .db files. jcodemunch-mcp flushes these at different times
+        # (neither file updates on every MCP call), so watching the max catches more events.
         global _jcodemunch_last_total, _jcodemunch_last_mtime, _jcodemunch_history
         stats_path = os.path.join(index_dir, "session_stats.json")
-        stats_mtime = os.path.getmtime(stats_path) if os.path.exists(stats_path) else 0
-        if stats_mtime > _jcodemunch_last_mtime and _jcodemunch_last_mtime > 0:
+        watched_paths = [stats_path, savings_path, *db_files]
+        newest_mtime = max(
+            (os.path.getmtime(p) for p in watched_paths if os.path.exists(p)),
+            default=0,
+        )
+        if newest_mtime > _jcodemunch_last_mtime and _jcodemunch_last_mtime > 0:
             if total_tokens_saved > _jcodemunch_last_total and _jcodemunch_last_total > 0:
                 delta = total_tokens_saved - _jcodemunch_last_total
                 _jcodemunch_history.append({
@@ -290,13 +296,12 @@ def collect_jcodemunch():
                     "saved_pct": 0,
                 })
             _jcodemunch_history = _jcodemunch_history[-100:]
-        _jcodemunch_last_mtime = stats_mtime
+        _jcodemunch_last_mtime = newest_mtime
         _jcodemunch_last_total = total_tokens_saved
 
         # Freshness: 100% if active in last 5 min, decays to 0% over 60 min
-        stats_path_fresh = os.path.join(index_dir, "session_stats.json")
-        if os.path.exists(stats_path_fresh):
-            elapsed_min = (time.time() - os.path.getmtime(stats_path_fresh)) / 60
+        if newest_mtime > 0:
+            elapsed_min = (time.time() - newest_mtime) / 60
             freshness = max(0, round(100 - (elapsed_min / 60 * 100)))
         else:
             freshness = 0
