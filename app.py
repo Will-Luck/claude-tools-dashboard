@@ -799,6 +799,10 @@ body {
     display: flex;
     align-items: center;
     gap: 10px;
+    text-decoration: none;
+}
+.header-left:hover .header-title {
+    text-shadow: 0 0 6px #00ff88;
 }
 .pulse-dot {
     width: 6px;
@@ -1084,10 +1088,10 @@ body {
 <body>
 <!-- Header -->
 <div class="header">
-    <div class="header-left">
+    <a class="header-left" href="https://github.com/Will-Luck/claude-tools-dashboard" target="_blank" rel="noopener noreferrer" title="View source on GitHub">
         <div class="pulse-dot"></div>
         <div class="header-title">CLAUDE TOOLS</div>
-    </div>
+    </a>
     <div class="header-centre" id="combined">COMBINED: <span>0</span> tokens saved</div>
     <div class="header-right" id="clock">--:--:-- &blacksquare; -- --- ----</div>
 </div>
