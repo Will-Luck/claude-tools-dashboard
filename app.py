@@ -1163,7 +1163,7 @@ body {
 <div class="feed-container">
     <div class="feed-header">
         <span class="feed-title">LIVE ACTIVITY</span>
-        <span class="feed-count">showing last 20</span>
+        <span class="feed-count">showing last 0</span>
     </div>
     <div class="feed-area" id="feed"></div>
 </div>
@@ -1246,7 +1246,7 @@ function renderSparkline(svgEl, points, tool) {
 function updateDashboard(d) {
     // Combined
     document.getElementById('combined').innerHTML =
-        'COMBINED: <span>' + formatTokens(d.combined_saved) + '</span> tokens saved';
+        'COMBINED: <span>' + formatTokens(d.combined_saved || 0) + '</span> tokens saved';
 
     // Ticker
     var w = d.weekly || {};
@@ -1415,6 +1415,11 @@ function updateDashboard(d) {
         );
     }
     feedEl.innerHTML = lines.join('');
+
+    var countEl = document.querySelector('.feed-count');
+    if (countEl) {
+        countEl.textContent = 'showing last ' + Math.min(hist.length, 100);
+    }
 }
 
 function escHtml(s) {
