@@ -7,3 +7,9 @@ screenshots/
 docs/
 README.md
 LICENSE
+
+# Test artefacts (added 2026-04-17)
+tests/
+.pytest_cache/
+requirements-dev.txt
+.hypothesis/

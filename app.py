@@ -106,6 +106,7 @@ def _run(cmd, timeout=2):
 
 
 _SECRET_PATTERNS = [
+    # Existing patterns (unchanged) -----------------------------------------
     (re.compile(r'((?:-e|--env)\s+\S*=)\S+'), r'\1***'),
     (re.compile(r'(\b\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PASSWD)\s*=)\S+', re.IGNORECASE), r'\1***'),
     (re.compile(r'sk-ant-[A-Za-z0-9_-]{8,}'), 'sk-ant-***'),
@@ -115,6 +116,23 @@ _SECRET_PATTERNS = [
     (re.compile(r'(\b[Xx]-[\w-]*(?:[Kk]ey|[Tt]oken):\s*)\S+'), r'\1***'),
     # curl -u user:password
     (re.compile(r'(\s-u\s+[^\s:]+:)\S+'), r'\1***'),
+
+    # New patterns (2026-04-17 correctness upgrade) -------------------------
+    # GitHub token prefixes: ghp_, gho_, ghu_, ghs_, ghr_ + 36+ char body
+    (re.compile(r'\bgh[pousr]_[A-Za-z0-9]{36,}\b'), 'ghX_***'),
+    # GitLab personal access tokens
+    (re.compile(r'\bglpat-[A-Za-z0-9_-]{20,}\b'), 'glpat-***'),
+    # Slack tokens: xoxb (bot), xoxp (user), xoxa (admin), xoxr (refresh)
+    (re.compile(r'\bxox[bpar]-[A-Za-z0-9-]{10,}\b'), 'xox*-***'),
+    # Generalised sk- provider keys (sk-or, sk-proj, sk-live, etc.)
+    # More restrictive than ^sk- so we keep the earlier sk-ant specific rule for readability
+    (re.compile(r'\bsk-[a-z]{2,}-[A-Za-z0-9_-]{16,}\b'), 'sk-***'),
+    # URL-embedded credentials — redact only the password portion
+    (re.compile(r'(://[^:/\s@]+:)([^@/\s]+)(@)'), r'\1***\3'),
+    # JSON-shaped secret values
+    (re.compile(r'("(?:api[_-]?key|access[_-]?token|secret|password)"\s*:\s*")[^"]+(")', re.IGNORECASE), r'\1***\2'),
+    # Long hex tokens (naked opaque). 32+ chars preserves 7-char and 8-char git SHAs.
+    (re.compile(r'\b[a-f0-9]{32,}\b'), '***'),
 ]
 
 
@@ -423,17 +441,53 @@ def _read_oauth_token():
         return None
 
 
+def _reset_in_future(iso_ts):
+    """True iff iso_ts is a parseable ISO-8601 timestamp strictly in the future (UTC).
+
+    Used to decide whether a cached pct/reset pair still refers to a live window.
+    Anthropic rate-limits the usage endpoint and we serve stale cache on 429/network
+    errors; once the reset timestamp has passed, the cached utilisation refers to a
+    dead window and must be scrubbed before it reaches the UI.
+    """
+    if not iso_ts:
+        return False
+    try:
+        return datetime.fromisoformat(iso_ts) > datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        return False
+
+
+def _scrub_stale_windows(usage):
+    """Null out pct+reset pairs whose reset has passed. Mutates in place and returns usage.
+
+    Prevents the ghost-window bug: when Anthropic rate-limits /oauth/usage, collect_claude_usage
+    serves stale cache. Once the reset timestamp has passed, the cached utilisation is
+    meaningless and must be scrubbed before it reaches the UI.
+    """
+    if usage is None:
+        return None
+    for pct_key, reset_key in (
+        ("session_pct", "session_reset"),
+        ("weekly_pct", "weekly_reset"),
+        ("sonnet_pct", "sonnet_reset"),
+    ):
+        if usage.get(reset_key) and not _reset_in_future(usage[reset_key]):
+            usage[pct_key] = None
+            usage[reset_key] = None
+    return usage
+
+
 def collect_claude_usage():
     """Fetch Claude usage from Anthropic API with 3-minute cache."""
     global _usage_cache, _usage_cache_time
 
     now = time.time()
     if _usage_cache and (now - _usage_cache_time) < USAGE_POLL_INTERVAL:
-        return _usage_cache
+        return _scrub_stale_windows(_usage_cache)
 
     token = _read_oauth_token()
     if not token:
-        return _usage_cache  # return stale cache or None
+        return _scrub_stale_windows(_usage_cache)
 
     try:
         req = Request(USAGE_API_URL)
@@ -458,14 +512,14 @@ def collect_claude_usage():
         }
         _usage_cache = result
         _usage_cache_time = now
-        return result
+        return _scrub_stale_windows(result)
     except HTTPError as e:
         if e.code == 429:
             # Back off on rate limit -- extend cache validity
             _usage_cache_time = now - USAGE_POLL_INTERVAL + USAGE_BACKOFF
-        return _usage_cache
+        return _scrub_stale_windows(_usage_cache)
     except Exception:
-        return _usage_cache
+        return _scrub_stale_windows(_usage_cache)
 
 
 def _load_weekly_cache():
