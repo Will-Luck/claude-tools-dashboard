@@ -1,9 +1,13 @@
 # Claude Tools Dashboard
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776ab?logo=python&logoColor=white)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Docker Hub](https://img.shields.io/docker/v/willluck/claude-tools-dashboard?logo=docker&logoColor=white&label=Docker%20Hub)](https://hub.docker.com/r/willluck/claude-tools-dashboard)
-[![GHCR](https://img.shields.io/badge/ghcr.io-available-2496ed?logo=github&logoColor=white)](https://ghcr.io/will-luck/claude-tools-dashboard)
+[![CI](https://github.com/Will-Luck/claude-tools-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/Will-Luck/claude-tools-dashboard/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Will-Luck/claude-tools-dashboard)](https://github.com/Will-Luck/claude-tools-dashboard/releases)
+[![Licence](https://img.shields.io/github/license/Will-Luck/claude-tools-dashboard)](LICENSE)
+[![GHCR](https://img.shields.io/badge/ghcr.io-will--luck%2Fclaude--tools--dashboard-blue?logo=github)](https://github.com/Will-Luck/claude-tools-dashboard/pkgs/container/claude-tools-dashboard)
+[![Docker Hub](https://img.shields.io/badge/Docker%20Hub-willluck%2Fclaude--tools--dashboard-blue?logo=docker)](https://hub.docker.com/r/willluck/claude-tools-dashboard)
+[![Pulls](https://img.shields.io/endpoint?url=https://pkgbadge.pphserv.uk/Will-Luck/claude-tools-dashboard/pulls.json)](https://github.com/Will-Luck/claude-tools-dashboard/pkgs/container/claude-tools-dashboard)
+[![Image Size](https://img.shields.io/endpoint?url=https://pkgbadge.pphserv.uk/Will-Luck/claude-tools-dashboard/size.json)](https://github.com/Will-Luck/claude-tools-dashboard/pkgs/container/claude-tools-dashboard)
+[![Platforms](https://img.shields.io/endpoint?url=https://pkgbadge.pphserv.uk/Will-Luck/claude-tools-dashboard/arch.json)](https://github.com/Will-Luck/claude-tools-dashboard/pkgs/container/claude-tools-dashboard)
 
 Live wallboard for monitoring token savings across your Claude Code toolchain. Tracks [RTK](https://github.com/reachingforthejack/rtk), [Headroom](https://github.com/chopratejas/headroom), [jCodeMunch](https://github.com/jgravelle/jcodemunch-mcp), and [jDocMunch](https://github.com/jgravelle/jdocmunch-mcp) in a single-page dashboard with real-time SSE updates.
 
