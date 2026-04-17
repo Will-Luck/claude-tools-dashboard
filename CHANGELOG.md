@@ -4,6 +4,61 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-04-17
+
+Correctness & secrets-safety upgrade. Two bug fixes and a test suite
+bootstrap. SSE payload schema unchanged; no user-visible UI changes.
+
+### Added
+
+- Test suite bootstrap: `pytest.ini`, `requirements-dev.txt`, `tests/test_app.py`
+  with 55 tests across four groups — regression net for existing
+  `_SECRET_PATTERNS`, coverage for new patterns, property-based hypothesis
+  test on long hex tokens (200 examples), `_reset_in_future`,
+  `_scrub_stale_windows`, `_group_history` burst-collapse, weekly cache
+  rotation.
+- Seven new regex rules in `_SECRET_PATTERNS` covering GitHub prefixes
+  (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`), GitLab (`glpat-`), Slack
+  (`xox[bpar]-`), generalised `sk-<provider>-` keys, URL-embedded
+  credentials, JSON-shaped secret values, and naked hex tokens >=32
+  chars. The 32-char threshold preserves 7 and 8 char git SHAs.
+- `_reset_in_future(iso_ts)` helper: true iff the timestamp is parseable
+  ISO-8601 strictly in the future (UTC). Returns False for None, empty,
+  or unparseable input.
+- `_scrub_stale_windows(usage)` helper: nulls out pct/reset pairs whose
+  reset has passed. Applied at every return path in
+  `collect_claude_usage`.
+- `.dockerignore` entries for `tests/`, `.pytest_cache/`, `.hypothesis/`,
+  `requirements-dev.txt`.
+
+### Fixed
+
+- Ghost-window bug: `collect_claude_usage` served the last successful
+  cache indefinitely during Anthropic rate-limit (HTTP 429) events. Once
+  the cached `weekly_reset` / `session_reset` / `sonnet_reset` timestamp
+  passed, the cached pct value referred to a dead window but still
+  displayed as live data. Every return path now scrubs stale pct/reset
+  pairs before handing them to the caller. `_usage_cache` still holds
+  the raw fetched data so a subsequent successful fetch re-populates.
+- Security gap in `_sanitise_cmd`: naked opaque tokens without a keyword
+  prefix could reach the public dashboard feed unredacted. Examples that
+  now get caught: 40-char Gitea-style hex tokens, GitHub `ghp_...` tokens
+  pasted into commands, URL-embedded `user:password@host` credentials,
+  JSON bodies with `"api_key": "..."`-style secrets. Existing patterns
+  remain unchanged and continue to catch their cases.
+
+### Follow-ups queued
+
+- `_sanitise_cmd` round 2: classic OpenAI `sk-<48char>` (no provider
+  prefix), uppercase provider in `sk-<prov>-`, negative tests pinning
+  current false-positive behaviour (full 40-char SHAs and `sha256:`
+  digests do get redacted — acceptable trade-off but worth pinning).
+- `_scrub_stale_windows` round 2: hoist pct/reset key tuple to a module
+  constant, use `dict(_usage_cache)` copy at cache-hit returns for
+  thread-safety defence-in-depth, add cache-hit end-to-end and
+  idempotence tests, document interaction with `collect_all` weekly
+  rotation.
+
 ## [1.2.0] - 2026-04-09
 
 Activity feed realtime rewrite. The LIVE ACTIVITY feed now updates within
