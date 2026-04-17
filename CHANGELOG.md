@@ -6,8 +6,24 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Round-2 follow-ups from the 1.2.1 code review (issue #2). No behaviour
-change to the SSE payload; internal tightening and additional test coverage.
+## [1.2.2] - 2026-04-17
+
+Round-2 follow-ups from the 1.2.1 code review (issue #2) plus release
+automation adopted from the iplayer-arr template. No behaviour change
+to the SSE payload; internal tightening, additional test coverage, and
+a full GitHub Actions CI + release pipeline.
+
+### Release automation
+
+- `.github/workflows/ci.yml` runs the pytest suite on every push and PR.
+- `.github/workflows/release.yml` builds multi-arch Docker images
+  (linux/amd64 + linux/arm64), pushes to GHCR and Docker Hub, syncs the
+  README to the Hub description, and publishes a GitHub Release using
+  the tag annotation as the body — all triggered by pushing a `v*` tag.
+- Dockerfile accepts `VERSION` and `BUILD_DATE` build args, stamps OCI
+  labels, and exports `APP_VERSION` / `APP_BUILD_DATE` env vars.
+- README badge block widened to the 8-badge standard (CI, Release,
+  Licence, GHCR, Docker Hub, Pulls, Image Size, Platforms).
 
 ### Added
 
