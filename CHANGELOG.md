@@ -4,6 +4,47 @@ All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Round-2 follow-ups from the 1.2.1 code review (issue #2). No behaviour
+change to the SSE payload; internal tightening and additional test coverage.
+
+### Added
+
+- Module constant `_USAGE_WINDOW_KEYS` — single source of truth for the
+  Anthropic usage windows. Each tuple is `(pct_key, reset_key, api_block)`
+  and is consumed by both `collect_claude_usage` (result build) and
+  `_scrub_stale_windows` (iteration). Adding a fourth window now requires
+  one edit instead of two.
+- `_scrubbed_cache_snapshot()` helper — returns a scrubbed **copy** of
+  `_usage_cache` so mutation stays off the shared dict. Readers can no
+  longer observe `_usage_cache` mid-scrub.
+- Legacy OpenAI key regex: `\bsk-[A-Za-z0-9]{32,}\b` catches classic
+  `sk-<48 alphanumeric>` keys with no provider segment.
+- Eleven new tests: SHA / `sha256:` redaction pins, legacy OpenAI key
+  coverage, `sk-<UPPERCASE>-…` provider rule, `_scrub_stale_windows`
+  idempotence, asymmetric absence symmetry, end-to-end cache-hit scrubbing
+  (x2), weekly-rotation halt when `weekly_reset=None`. Total: 66 tests.
+
+### Changed
+
+- `sk-<provider>-` rule now accepts both cases (`[A-Za-z]{2,}` instead of
+  `[a-z]{2,}`) so `sk-OR-…` matches alongside `sk-or-…`.
+- `_scrub_stale_windows` now guards `usage[pct_key] = None` with
+  `if pct_key in usage`. Previously a stale reset with an absent pct key
+  would materialise the pct key as None; now absence is preserved.
+- `collect_claude_usage` returns a scrubbed **copy** of the cache on every
+  path; the authoritative `_usage_cache` dict is never mutated by scrubbing.
+
+### Documented
+
+- Explicit inline comment on the naked-hex rule acknowledging that full
+  40-char git SHAs and `sha256:…` digests are redacted as a side effect of
+  catching Gitea-style opaque tokens. Behaviour is pinned by tests.
+- `_scrub_stale_windows` docstring explains the intentional interaction
+  with `collect_all`'s weekly rotation: a dead window with `weekly_reset`
+  scrubbed to None will not rotate a baseline it cannot verify.
+
 ## [1.2.1] - 2026-04-17
 
 Correctness & secrets-safety upgrade. Two bug fixes and a test suite

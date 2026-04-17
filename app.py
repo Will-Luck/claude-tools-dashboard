@@ -124,14 +124,22 @@ _SECRET_PATTERNS = [
     (re.compile(r'\bglpat-[A-Za-z0-9_-]{20,}\b'), 'glpat-***'),
     # Slack tokens: xoxb (bot), xoxp (user), xoxa (admin), xoxr (refresh)
     (re.compile(r'\bxox[bpar]-[A-Za-z0-9-]{10,}\b'), 'xox*-***'),
-    # Generalised sk- provider keys (sk-or, sk-proj, sk-live, etc.)
-    # More restrictive than ^sk- so we keep the earlier sk-ant specific rule for readability
-    (re.compile(r'\bsk-[a-z]{2,}-[A-Za-z0-9_-]{16,}\b'), 'sk-***'),
+    # Generalised sk- provider keys (sk-or, sk-OR, sk-proj, sk-live, etc.)
+    # More restrictive than ^sk- so we keep the earlier sk-ant specific rule for readability.
+    # Provider segment accepts both cases so sk-OR-... is covered.
+    (re.compile(r'\bsk-[A-Za-z]{2,}-[A-Za-z0-9_-]{16,}\b'), 'sk-***'),
+    # Legacy OpenAI keys: sk-<48+ alphanumeric> with no provider segment.
+    # Runs AFTER the two sk- rules above so sk-ant-* and sk-<prov>-* keep their specific replacements.
+    (re.compile(r'\bsk-[A-Za-z0-9]{32,}\b'), 'sk-***'),
     # URL-embedded credentials — redact only the password portion
     (re.compile(r'(://[^:/\s@]+:)([^@/\s]+)(@)'), r'\1***\3'),
     # JSON-shaped secret values
     (re.compile(r'("(?:api[_-]?key|access[_-]?token|secret|password)"\s*:\s*")[^"]+(")', re.IGNORECASE), r'\1***\2'),
-    # Long hex tokens (naked opaque). 32+ chars preserves 7-char and 8-char git SHAs.
+    # Long hex tokens (naked opaque). 32+ chars catches Gitea/generic opaque tokens.
+    # Trade-off accepted: this ALSO redacts full 40-char git SHAs and sha256:... docker
+    # image digests as a side effect. Tests pin both behaviours so a future tweak (e.g.
+    # adding exclusion anchors like (?<![:@=/])) is a conscious choice rather than a
+    # silent regression. 32-char threshold preserves 7- and 8-char git SHAs.
     (re.compile(r'\b[a-f0-9]{32,}\b'), '***'),
 ]
 
@@ -457,24 +465,54 @@ def _reset_in_future(iso_ts):
         return False
 
 
+# Single source of truth for Anthropic usage windows. Each tuple is
+# (pct_key, reset_key, api_block) — the API block name is the key on the
+# /oauth/usage response that carries the window's utilisation + resets_at.
+# Adding a fourth window (monthly, etc.) requires one edit here; both
+# collect_claude_usage and _scrub_stale_windows consume this constant.
+_USAGE_WINDOW_KEYS = (
+    ("session_pct", "session_reset", "five_hour"),
+    ("weekly_pct", "weekly_reset", "seven_day"),
+    ("sonnet_pct", "sonnet_reset", "seven_day_sonnet"),
+)
+
+
 def _scrub_stale_windows(usage):
     """Null out pct+reset pairs whose reset has passed. Mutates in place and returns usage.
 
     Prevents the ghost-window bug: when Anthropic rate-limits /oauth/usage, collect_claude_usage
     serves stale cache. Once the reset timestamp has passed, the cached utilisation is
     meaningless and must be scrubbed before it reaches the UI.
+
+    Intentionally sets reset_key to None once the window expires — collect_all's weekly
+    rotation keys off weekly_reset and will not rotate when it is None. That is the
+    correct behaviour: a dead window must not rotate a baseline it can no longer verify.
+    Callers needing rotation must read from a live (unscrubbed) source.
+
+    Idempotent: a second call on an already-scrubbed dict is a no-op.
     """
     if usage is None:
         return None
-    for pct_key, reset_key in (
-        ("session_pct", "session_reset"),
-        ("weekly_pct", "weekly_reset"),
-        ("sonnet_pct", "sonnet_reset"),
-    ):
+    for pct_key, reset_key, _api_block in _USAGE_WINDOW_KEYS:
         if usage.get(reset_key) and not _reset_in_future(usage[reset_key]):
-            usage[pct_key] = None
+            # Only null pct_key if it was present — preserves absence symmetry
+            # (reset absent + pct present leaves pct untouched; reset present +
+            # pct absent should leave pct absent rather than materialising it).
+            if pct_key in usage:
+                usage[pct_key] = None
             usage[reset_key] = None
     return usage
+
+
+def _scrubbed_cache_snapshot():
+    """Return a scrubbed COPY of _usage_cache (never mutates the shared dict).
+
+    Defence-in-depth against partial-snapshot reads from concurrent threads:
+    scrub runs over a fresh dict so readers never observe _usage_cache mid-scrub.
+    """
+    if _usage_cache is None:
+        return None
+    return _scrub_stale_windows(dict(_usage_cache))
 
 
 def collect_claude_usage():
@@ -483,11 +521,11 @@ def collect_claude_usage():
 
     now = time.time()
     if _usage_cache and (now - _usage_cache_time) < USAGE_POLL_INTERVAL:
-        return _scrub_stale_windows(_usage_cache)
+        return _scrubbed_cache_snapshot()
 
     token = _read_oauth_token()
     if not token:
-        return _scrub_stale_windows(_usage_cache)
+        return _scrubbed_cache_snapshot()
 
     try:
         req = Request(USAGE_API_URL)
@@ -497,29 +535,23 @@ def collect_claude_usage():
         with urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
 
-        five = data.get("five_hour") or {}
-        seven = data.get("seven_day") or {}
-        sonnet = data.get("seven_day_sonnet") or {}
+        result = {"active": True}
+        for pct_key, reset_key, api_block in _USAGE_WINDOW_KEYS:
+            block = data.get(api_block) or {}
+            result[pct_key] = block.get("utilization")
+            result[reset_key] = block.get("resets_at")
 
-        result = {
-            "session_pct": five.get("utilization"),
-            "session_reset": five.get("resets_at"),
-            "weekly_pct": seven.get("utilization"),
-            "weekly_reset": seven.get("resets_at"),
-            "sonnet_pct": sonnet.get("utilization"),
-            "sonnet_reset": sonnet.get("resets_at"),
-            "active": True,
-        }
         _usage_cache = result
         _usage_cache_time = now
-        return _scrub_stale_windows(result)
+        # Return a scrubbed copy so the cache stays raw and authoritative.
+        return _scrub_stale_windows(dict(result))
     except HTTPError as e:
         if e.code == 429:
             # Back off on rate limit -- extend cache validity
             _usage_cache_time = now - USAGE_POLL_INTERVAL + USAGE_BACKOFF
-        return _scrub_stale_windows(_usage_cache)
+        return _scrubbed_cache_snapshot()
     except Exception:
-        return _scrub_stale_windows(_usage_cache)
+        return _scrubbed_cache_snapshot()
 
 
 def _load_weekly_cache():

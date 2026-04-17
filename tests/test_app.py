@@ -7,6 +7,8 @@ Four test groups:
   4. TestWeeklyCache — weekly cache rotation in collect_all
 """
 
+import time
+
 import app
 from hypothesis import given, strategies as st, settings
 
@@ -158,6 +160,40 @@ class TestSanitiseCmdNewPatterns:
         cmd = "git log a1b2c3d4..HEAD"
         assert app._sanitise_cmd(cmd) == cmd
 
+    def test_full_git_sha_is_redacted_side_effect(self):
+        """Trade-off pin: the 32+ hex rule redacts full 40-char git SHAs as a side
+        effect of catching Gitea-style opaque tokens. Locked in so a future tweak
+        (e.g. adding a negative lookbehind) is a conscious choice."""
+        sha = "a1b2c3d4e5f67890a1b2c3d4e5f67890abcdef01"
+        cmd = f"git show {sha}"
+        assert sha not in app._sanitise_cmd(cmd)
+
+    def test_sha256_digest_is_redacted_side_effect(self):
+        """Trade-off pin: sha256:... docker image digests are redacted. The 64-char
+        hex body matches the naked-hex rule. Tightening would need negative
+        lookbehind or a dedicated sha256: passthrough rule."""
+        digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        cmd = f"docker pull myimage@{digest}"
+        assert "1111111111111111111111111111111111111111111111111111111111111111" not in app._sanitise_cmd(cmd)
+
+    def test_legacy_openai_key_no_provider(self):
+        """Classic OpenAI sk-<48 alphanumeric> with no provider segment."""
+        key = "sk-" + "A" * 48
+        cmd = f"curl -H 'X-Key: {key}' api.openai.com"
+        assert key not in app._sanitise_cmd(cmd)
+
+    def test_legacy_openai_key_mixed_alphanumeric(self):
+        """Legacy OpenAI keys mix upper, lower, and digits with no dashes."""
+        key = "sk-abcDEF123" + "X" * 40
+        cmd = f"echo {key}"
+        assert key not in app._sanitise_cmd(cmd)
+
+    def test_sk_provider_uppercase_segment(self):
+        """sk-OR-... (uppercase provider) must match the generalised sk-<prov>- rule."""
+        key = "sk-OR-" + "a" * 20
+        cmd = f"curl -H 'X-Key: {key}' api.openrouter.ai"
+        assert key not in app._sanitise_cmd(cmd)
+
 
 # ======================================================================
 # TestSanitiseCmd — property-based on long hex tokens
@@ -283,6 +319,98 @@ class TestScrubStaleWindows:
         result = app._scrub_stale_windows(usage)
         assert result["session_pct"] == 45
         assert result["weekly_pct"] == 62
+
+    def test_pct_absent_reset_stale_does_not_materialise_pct(self):
+        # Asymmetric-case pin: a stale reset with no corresponding pct key must
+        # NOT create the pct key. The scrub preserves absence symmetry.
+        usage = {"weekly_reset": self._past()}
+        result = app._scrub_stale_windows(usage)
+        assert "weekly_pct" not in result
+        assert result["weekly_reset"] is None
+
+    def test_pct_absent_reset_fresh_does_not_materialise_pct(self):
+        # Control: fresh reset with absent pct leaves both alone (no materialisation).
+        usage = {"weekly_reset": self._future()}
+        result = app._scrub_stale_windows(usage)
+        assert "weekly_pct" not in result
+        assert result["weekly_reset"] == usage["weekly_reset"]
+
+    def test_scrub_is_idempotent(self):
+        # Locking in implicit idempotence so a future "optimisation" can't break it.
+        usage = {
+            "session_pct": 45,
+            "session_reset": self._future(),
+            "weekly_pct": 62,
+            "weekly_reset": self._past(),
+            "sonnet_pct": 28,
+            "sonnet_reset": self._past(),
+        }
+        once = app._scrub_stale_windows(dict(usage))
+        twice = app._scrub_stale_windows(app._scrub_stale_windows(dict(usage)))
+        assert once == twice
+
+
+# ======================================================================
+# TestCollectClaudeUsageCacheScrub — end-to-end scrub on cache hit
+# ======================================================================
+
+
+class TestCollectClaudeUsageCacheScrub:
+    """collect_claude_usage must scrub stale windows when serving from cache.
+
+    Seeds the module cache with mixed future/past resets and verifies the
+    cache-hit return path returns scrubbed data — and that the cache itself
+    stays raw (scrubbing is read-side only)."""
+
+    def _future(self, hours=1):
+        return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+
+    def _past(self, hours=1):
+        return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+    def test_cache_hit_scrubs_newly_stale_window(self, monkeypatch):
+        past = self._past()
+        future = self._future()
+        seeded = {
+            "session_pct": 50,
+            "session_reset": future,
+            "weekly_pct": 20,
+            "weekly_reset": past,    # stale between populate and read
+            "sonnet_pct": 30,
+            "sonnet_reset": future,
+            "active": True,
+        }
+        monkeypatch.setattr(app, "_usage_cache", dict(seeded))
+        monkeypatch.setattr(app, "_usage_cache_time", time.time())
+
+        result = app.collect_claude_usage()
+
+        # Stale weekly window scrubbed
+        assert result["weekly_pct"] is None
+        assert result["weekly_reset"] is None
+        # Fresh windows pass through
+        assert result["session_pct"] == 50
+        assert result["sonnet_pct"] == 30
+
+    def test_cache_hit_returns_copy_not_shared_cache(self, monkeypatch):
+        # Mutating the returned dict must not corrupt the module-level cache.
+        past = self._past()
+        seeded = {
+            "session_pct": 50,
+            "session_reset": self._future(),
+            "weekly_pct": 20,
+            "weekly_reset": past,
+            "active": True,
+        }
+        monkeypatch.setattr(app, "_usage_cache", dict(seeded))
+        monkeypatch.setattr(app, "_usage_cache_time", time.time())
+
+        result = app.collect_claude_usage()
+        result["session_pct"] = 999  # caller mutates
+
+        # Re-read: cache untouched by caller's mutation
+        second = app.collect_claude_usage()
+        assert second["session_pct"] == 50
 
 
 # ======================================================================
@@ -497,3 +625,38 @@ class TestWeeklyCacheRotation:
         assert cache["last_week_savings"] == 700     # 1200 - 500
         assert cache["last_week_end"] == old_reset
         assert cache["current_week_baseline"] == 1200
+
+    def test_weekly_reset_none_halts_rotation(self, tmp_path, monkeypatch):
+        """Intentional-gap pin: once _scrub_stale_windows nulls weekly_reset, the
+        rotation branch in collect_all (`if claude_usage and claude_usage.get("weekly_reset"):`)
+        does NOT fire — dead windows must not rotate a baseline they cannot verify.
+
+        Consequence documented in _scrub_stale_windows docstring: if Anthropic
+        rate-limits past a weekly boundary, the tracker freezes mid-week rather
+        than advancing against stale/expired data."""
+        cache_file = self._configure_cache_dir(monkeypatch, tmp_path)
+        stored_reset = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        stored_start = datetime.now(timezone.utc).isoformat()
+
+        json.dump(
+            {
+                "current_week_baseline": 500,
+                "current_week_start": stored_start,
+                "weekly_reset_at": stored_reset,
+                "last_week_savings": 42,
+            },
+            open(cache_file, "w"),
+        )
+
+        self._stub_collectors(monkeypatch, total_saved=1500)
+        # Simulate a scrubbed snapshot: weekly_reset is None
+        self._stub_usage(monkeypatch, weekly_reset=None)
+
+        app.collect_all()
+
+        cache = json.load(open(cache_file))
+        # Rotation must NOT have fired
+        assert cache["current_week_baseline"] == 500
+        assert cache["weekly_reset_at"] == stored_reset
+        assert cache["last_week_savings"] == 42
+        assert "last_week_end" not in cache  # set only on rotation
