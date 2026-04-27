@@ -6,6 +6,22 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **jDataMunch tile** (5th tool card). Mirrors jCodeMunch / jDocMunch:
+  reads `~/.data-index/_savings.json` for total tokens saved, counts
+  indexed datasets (JSON + DB files), tracks freshness, and feeds the
+  shared sparkline and activity feed pipeline. Teal accent (`#1dd1a1`)
+  keeps the palette distinct from the other four tools.
+- `JDATAMUNCH_INDEX_DIR` and `JDATAMUNCH_BIN` env vars (defaults
+  `~/.data-index` and `jdatamunch-mcp`).
+- Version resolution falls back to `pipx list --short` because
+  jdatamunch-mcp 0.8.4 prints argparse usage on `--version` and exits
+  non-zero.
+- "no datasets yet" placeholder so the card renders cleanly with the
+  correct version label even before the first MCP call creates the
+  index dir.
+
 ## [1.2.2] - 2026-04-17
 
 Round-2 follow-ups from the 1.2.1 code review (issue #2) plus release
