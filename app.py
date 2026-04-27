@@ -30,6 +30,8 @@ JCODEMUNCH_INDEX_DIR = os.environ.get("JCODEMUNCH_INDEX_DIR", os.path.join(HOME,
 JCODEMUNCH_BIN = os.environ.get("JCODEMUNCH_BIN", "jcodemunch-mcp")
 JDOCMUNCH_INDEX_DIR = os.environ.get("JDOCMUNCH_INDEX_DIR", os.path.join(HOME, ".doc-index"))
 JDOCMUNCH_BIN = os.environ.get("JDOCMUNCH_BIN", "jdocmunch-mcp")
+JDATAMUNCH_INDEX_DIR = os.environ.get("JDATAMUNCH_INDEX_DIR", os.path.join(HOME, ".data-index"))
+JDATAMUNCH_BIN = os.environ.get("JDATAMUNCH_BIN", "jdatamunch-mcp")
 PORT = int(os.environ.get("PORT", "8095"))
 SSE_INTERVAL = int(os.environ.get("SSE_INTERVAL", "2"))
 COLLECTOR_INTERVAL = float(os.environ.get("COLLECTOR_INTERVAL", "0.25"))
@@ -48,6 +50,7 @@ _sparkline_buffers = {
     "headroom": deque(maxlen=60),
     "jcodemunch": deque(maxlen=60),
     "jdocmunch": deque(maxlen=60),
+    "jdatamunch": deque(maxlen=60),
 }
 _headroom_last_total = 0
 _headroom_history = []
@@ -57,11 +60,15 @@ _jcodemunch_history = []
 _jdocmunch_last_total = 0
 _jdocmunch_last_mtime = 0
 _jdocmunch_history = []
+_jdatamunch_last_total = 0
+_jdatamunch_last_mtime = 0
+_jdatamunch_history = []
 _last_collect_success = {
     "rtk": 0.0,
     "headroom": 0.0,
     "jcodemunch": 0.0,
     "jdocmunch": 0.0,
+    "jdatamunch": 0.0,
 }
 
 # Cached version strings. resolve_versions_once() populates this at module
@@ -71,6 +78,7 @@ _cached_versions = {
     "rtk": None,
     "jcodemunch": None,
     "jdocmunch": None,
+    "jdatamunch": None,
 }
 
 
@@ -92,6 +100,17 @@ def resolve_versions_once():
                     jd_v = parts[1] if len(parts) > 1 else None
                     break
     _cached_versions["jdocmunch"] = jd_v if jd_v else "unknown"
+
+    jdat_v = _run([JDATAMUNCH_BIN, "--version"])
+    if not jdat_v:
+        raw = _run(["pipx", "list", "--short"])
+        if raw:
+            for line in raw.splitlines():
+                if "jdatamunch" in line:
+                    parts = line.strip().split()
+                    jdat_v = parts[1] if len(parts) > 1 else None
+                    break
+    _cached_versions["jdatamunch"] = jdat_v if jdat_v else "unknown"
 
 
 def _run(cmd, timeout=2):
@@ -349,6 +368,95 @@ def collect_jcodemunch():
             "index_size_mb": index_size_mb,
             "version": version or "unknown",
             "history": list(_jcodemunch_history),
+            "freshness": freshness,
+            "freshness_label": freshness_label,
+        }
+    except Exception:
+        return None
+
+
+def collect_jdatamunch():
+    global _jdatamunch_last_total, _jdatamunch_last_mtime, _jdatamunch_history
+    try:
+        index_dir = JDATAMUNCH_INDEX_DIR
+        if not os.path.isdir(index_dir):
+            return {
+                "active": False,
+                "total_saved": 0,
+                "datasets_indexed": 0,
+                "index_size_mb": 0,
+                "version": _cached_versions.get("jdatamunch") or "unknown",
+                "history": [],
+                "freshness": 0,
+                "freshness_label": "no datasets yet",
+            }
+
+        savings_path = os.path.join(index_dir, "_savings.json")
+        total_tokens_saved = 0
+        if os.path.exists(savings_path):
+            with open(savings_path) as f:
+                data = json.load(f)
+            total_tokens_saved = data.get("total_tokens_saved", 0)
+
+        index_files = glob.glob(os.path.join(index_dir, "local", "*.json"))
+        index_files += glob.glob(os.path.join(index_dir, "*.db"))
+        datasets_indexed = len(index_files)
+        index_size_mb = round(sum(os.path.getsize(f) for f in index_files if os.path.exists(f)) / (1024 * 1024), 1)
+
+        version = _cached_versions.get("jdatamunch") or "unknown"
+
+        savings_mtime = os.path.getmtime(savings_path) if os.path.exists(savings_path) else 0
+        idx_mtime = max(
+            (os.path.getmtime(f) for f in index_files if os.path.exists(f)),
+            default=0,
+        )
+        newest_mtime = max(savings_mtime, idx_mtime)
+
+        if newest_mtime > _jdatamunch_last_mtime and _jdatamunch_last_mtime > 0:
+            delta = total_tokens_saved - _jdatamunch_last_total
+            if delta > 0:
+                _jdatamunch_history.append({
+                    "time": datetime.now(timezone.utc).isoformat(),
+                    "tool": "jdatamunch",
+                    "cmd": f"indexed/queried -- saved {delta:,} tokens",
+                    "saved_tokens": delta,
+                    "saved_pct": 0,
+                })
+            else:
+                _jdatamunch_history.append({
+                    "time": datetime.now(timezone.utc).isoformat(),
+                    "tool": "jdatamunch",
+                    "cmd": f"query across {datasets_indexed} datasets ({index_size_mb}MB indexed)",
+                    "saved_tokens": 0,
+                    "saved_pct": 0,
+                })
+            _jdatamunch_history = _jdatamunch_history[-100:]
+        _jdatamunch_last_mtime = newest_mtime
+        _jdatamunch_last_total = total_tokens_saved
+
+        if newest_mtime > 0:
+            elapsed_min = (time.time() - newest_mtime) / 60
+            freshness = max(0, round(100 - (elapsed_min / 60 * 100)))
+        else:
+            freshness = 0
+
+        if freshness > 0:
+            if elapsed_min < 1:
+                freshness_label = "just now"
+            elif elapsed_min < 60:
+                freshness_label = f"{int(elapsed_min)}m ago"
+            else:
+                freshness_label = f"{int(elapsed_min / 60)}h ago"
+        else:
+            freshness_label = "idle"
+
+        return {
+            "active": datasets_indexed > 0 or total_tokens_saved > 0,
+            "total_saved": total_tokens_saved,
+            "datasets_indexed": datasets_indexed,
+            "index_size_mb": index_size_mb,
+            "version": version,
+            "history": list(_jdatamunch_history),
             "freshness": freshness,
             "freshness_label": freshness_label,
         }
@@ -658,6 +766,7 @@ def collect_all():
         "headroom": collect_headroom,
         "jcodemunch": collect_jcodemunch,
         "jdocmunch": collect_jdocmunch,
+        "jdatamunch": collect_jdatamunch,
     }
 
     results = {}
@@ -785,6 +894,8 @@ def collect_all():
         history.extend(results["jcodemunch"]["history"])
     if "history" in results.get("jdocmunch", {}):
         history.extend(results["jdocmunch"]["history"])
+    if "history" in results.get("jdatamunch", {}):
+        history.extend(results["jdatamunch"]["history"])
 
     # Sort by time descending, collapse bursts, limit to 100
     history.sort(key=lambda x: x.get("time", ""), reverse=True)
@@ -800,6 +911,7 @@ def collect_all():
         "headroom": results["headroom"],
         "jcodemunch": results["jcodemunch"],
         "jdocmunch": results["jdocmunch"],
+        "jdatamunch": results["jdatamunch"],
         "sparklines": sparklines,
         "history": history,
         "claude_usage": claude_usage or {"active": False},
@@ -1023,6 +1135,10 @@ body {
 .fill-jdocmunch { background: #a55eea; }
 .stroke-jdocmunch { stroke: #a55eea; }
 .area-jdocmunch { fill: rgba(165, 94, 234, 0.1); }
+.clr-jdatamunch { color: #1dd1a1; }
+.fill-jdatamunch { background: #1dd1a1; }
+.stroke-jdatamunch { stroke: #1dd1a1; }
+.area-jdatamunch { fill: rgba(29, 209, 161, 0.1); }
 .health-dot {
     width: 5px;
     height: 5px;
@@ -1270,6 +1386,22 @@ body {
         <div class="card-delta" id="jdocmunch-delta"></div>
     </div>
 
+    <!-- jDataMunch -->
+    <div class="card" id="jdatamunch-card">
+        <div class="card-header">
+            <span class="health-dot health-error" id="jdatamunch-health"></span><a href="https://github.com/jgravelle/jdatamunch-mcp" target="_blank" class="card-name">jDataMunch</a>
+            <span class="card-version" id="jdatamunch-version">--</span>
+        </div>
+        <div class="card-value clr-jdatamunch" id="jdatamunch-value">--</div>
+        <div class="card-sub" id="jdatamunch-sub">tokens saved</div>
+        <div class="progress-track"><div class="progress-fill fill-jdatamunch" id="jdatamunch-bar" style="width:0%"></div></div>
+        <div class="card-stats" id="jdatamunch-stats">
+            <span><span class="label">datasets</span> <span class="val">--</span></span>
+        </div>
+        <div class="sparkline-container"><svg id="jdatamunch-sparkline" viewBox="0 0 200 35" preserveAspectRatio="none"></svg></div>
+        <div class="card-delta" id="jdatamunch-delta"></div>
+    </div>
+
 </div>
 
 <!-- Activity Feed -->
@@ -1318,12 +1450,13 @@ function pctClass(n) {
     return 'pct-green';
 }
 
-var TOOLS = ['rtk', 'headroom', 'jcodemunch', 'jdocmunch'];
+var TOOLS = ['rtk', 'headroom', 'jcodemunch', 'jdocmunch', 'jdatamunch'];
 var TOOL_COLOURS = {
     rtk: '#00ff88',
     headroom: '#00bfff',
     jcodemunch: '#ff9f43',
-    jdocmunch: '#a55eea'
+    jdocmunch: '#a55eea',
+    jdatamunch: '#1dd1a1'
 };
 
 function renderSparkline(svgEl, points, tool) {
@@ -1469,6 +1602,26 @@ function updateDashboard(d) {
             '<span><span class="label">docs</span> <span class="val">' + (jd.docs_indexed || 0) + '</span></span>' +
             '<span><span class="label">indexed</span> <span class="val">' + (jd.index_size_mb || 0) + 'MB</span></span>' +
             '<span><span class="label">active</span> <span class="val">' + (jd.freshness_label || 'idle') + '</span></span>';
+    }
+
+    // jDataMunch
+    var jdt = d.jdatamunch || {};
+    var jdtCard = document.getElementById('jdatamunch-card');
+    if (jdtCard) {
+        jdtCard.className = jdt.active ? 'card' : 'card inactive';
+        var jdtHealth = jdt.health || 'error';
+        var jdtDot = document.getElementById('jdatamunch-health');
+        if (jdtDot) jdtDot.className = 'health-dot health-' + jdtHealth;
+        document.getElementById('jdatamunch-version').textContent = shortVersion(jdt.version);
+        document.getElementById('jdatamunch-value').textContent = jdt.active ? formatTokens(jdt.total_saved || 0) : '--';
+        document.getElementById('jdatamunch-sub').textContent = 'tokens saved';
+        document.getElementById('jdatamunch-bar').style.width = (jdt.freshness || 0) + '%';
+        if (jdt.active) {
+            document.getElementById('jdatamunch-stats').innerHTML =
+                '<span><span class="label">datasets</span> <span class="val">' + (jdt.datasets_indexed || 0) + '</span></span>' +
+                '<span><span class="label">indexed</span> <span class="val">' + (jdt.index_size_mb || 0) + 'MB</span></span>' +
+                '<span><span class="label">active</span> <span class="val">' + (jdt.freshness_label || 'idle') + '</span></span>';
+        }
     }
 
     // Sparklines
