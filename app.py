@@ -1040,16 +1040,17 @@ body {
 /* Cards grid */
 .cards {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 10px;
     margin-bottom: 12px;
 }
 .card {
     background: #111;
     border: 1px solid #1a1a2e;
-    padding: 18px;
+    padding: 14px;
     border-radius: 4px;
     transition: opacity 0.3s;
+    min-width: 0;
 }
 .card.inactive { opacity: 0.5; }
 .card-header {
@@ -1060,9 +1061,9 @@ body {
     position: relative;
 }
 .card-name {
-    font-size: 12px;
+    font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: 2px;
+    letter-spacing: 1.5px;
     font-weight: bold;
     color: #999;
     text-decoration: none;
@@ -1070,17 +1071,18 @@ body {
 .card-name:hover { color: #fff; }
 .card-version {
     color: #555;
-    font-size: 11px;
+    font-size: 10px;
 }
 .card-value {
-    font-size: 36px;
+    font-size: 28px;
     font-weight: bold;
     margin-bottom: 2px;
+    line-height: 1.1;
 }
 .card-sub {
-    font-size: 13px;
+    font-size: 12px;
     color: #777;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
 }
 .progress-track {
     height: 3px;
@@ -1095,9 +1097,10 @@ body {
 }
 .card-stats {
     display: flex;
-    gap: 16px;
-    font-size: 12px;
-    margin-bottom: 10px;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-size: 11px;
+    margin-bottom: 8px;
 }
 .card-stats .label { color: #888; }
 .card-stats .val { color: #aaa; }
@@ -1254,10 +1257,13 @@ body {
     font-style: italic;
 }
 
-@media (max-width: 1000px) {
+@media (max-width: 1200px) {
+    .cards { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 800px) {
     .cards { grid-template-columns: repeat(2, 1fr); }
 }
-@media (max-width: 550px) {
+@media (max-width: 500px) {
     .cards { grid-template-columns: 1fr; }
 }
 /* Stats ticker */
