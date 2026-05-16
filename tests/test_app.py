@@ -885,3 +885,94 @@ class TestApiStats:
         resp = client.get("/api/stats")
         assert resp.status_code == 200
         assert resp.get_json() == {}
+
+
+# ======================================================================
+# TestWeeklySavingsClamp — v1.4.0: negative weekly totals are impossible
+# ======================================================================
+
+
+class TestWeeklySavingsClamp:
+    """Regression for the live tools.lucknet.uk bug where Saved Last Week
+    showed -5,072,457,996 tokens. Two protections:
+      - rotation clamps `last_week_savings = max(0, combined_saved - baseline)`
+      - per-tick clamp re-snapshots baseline when `this_week_savings < 0`
+    """
+
+    def _stub_collectors_with_total(self, monkeypatch, total):
+        """RTK reports `total`, all other collectors zero so we can predict combined_saved."""
+        monkeypatch.setattr(app, "collect_rtk", lambda: {"active": True, "total_saved": total, "history": []})
+        for n in ("headroom", "jcodemunch", "jdocmunch", "jdatamunch"):
+            monkeypatch.setattr(app, f"collect_{n}", lambda: {"active": True, "total_saved": 0, "history": []})
+
+    def test_rotation_never_negative(self, monkeypatch, tmp_path):
+        """When baseline is inflated above current combined_saved, last_week clamps to 0."""
+        monkeypatch.setattr(app, "WEEKLY_CACHE_DIR", str(tmp_path))
+        cache_path = tmp_path / "weekly.json"
+        # Pre-seed an inflated baseline (mimics tools.lucknet.uk state).
+        import json as _json
+        _json.dump({
+            "current_week_baseline": 5_000_000_000,
+            "weekly_reset_at": "2026-05-11T22:00:00Z",
+            "current_week_start": "2026-05-04T22:00:00Z",
+            "last_week_savings": 0,
+        }, open(cache_path, "w"))
+
+        # Combined is much smaller than baseline now.
+        self._stub_collectors_with_total(monkeypatch, 100_000_000)
+        # Fresh reset is in the future so the rotation branch fires.
+        monkeypatch.setattr(app, "collect_claude_usage", lambda: {
+            "active": True, "weekly_reset": "2026-05-18T22:00:00Z"
+        })
+
+        result = app.collect_all()
+        # No negative numbers ever leave collect_all.
+        assert result["weekly"]["last_week"] >= 0
+        assert result["weekly"]["this_week"] >= 0
+
+    def test_per_tick_resets_inverted_baseline(self, monkeypatch, tmp_path):
+        """If a previous version stored a huge baseline, the next tick re-snapshots."""
+        monkeypatch.setattr(app, "WEEKLY_CACHE_DIR", str(tmp_path))
+        cache_path = tmp_path / "weekly.json"
+        # Pre-seed: same week, baseline is bigger than current combined_saved.
+        # No rotation should fire (stored_reset == fresh_reset).
+        import json as _json
+        _json.dump({
+            "current_week_baseline": 5_000_000_000,
+            "weekly_reset_at": "2026-05-18T22:00:00Z",
+            "current_week_start": "2026-05-11T22:00:00Z",
+            "last_week_savings": 0,
+        }, open(cache_path, "w"))
+
+        self._stub_collectors_with_total(monkeypatch, 100_000_000)
+        monkeypatch.setattr(app, "collect_claude_usage", lambda: {
+            "active": True, "weekly_reset": "2026-05-18T22:00:00Z"
+        })
+
+        result = app.collect_all()
+        # This-week clamps to 0 and the baseline is re-snapshotted.
+        assert result["weekly"]["this_week"] == 0
+        # Cache file must reflect the re-snapshot.
+        cache = _json.load(open(cache_path))
+        assert cache["current_week_baseline"] == 100_000_000
+
+    def test_stored_negative_last_week_clamped_on_read(self, monkeypatch, tmp_path):
+        """Cache file with legacy negative last_week (e.g. produced by v1.2.2)
+        must still display as 0 in v1.4.0+ rather than leaking the negative."""
+        monkeypatch.setattr(app, "WEEKLY_CACHE_DIR", str(tmp_path))
+        cache_path = tmp_path / "weekly.json"
+        import json as _json
+        _json.dump({
+            "current_week_baseline": 100_000_000,
+            "weekly_reset_at": "2026-05-18T22:00:00Z",
+            "current_week_start": "2026-05-11T22:00:00Z",
+            "last_week_savings": -5_072_457_996,
+        }, open(cache_path, "w"))
+
+        self._stub_collectors_with_total(monkeypatch, 100_000_000)
+        monkeypatch.setattr(app, "collect_claude_usage", lambda: {
+            "active": True, "weekly_reset": "2026-05-18T22:00:00Z"
+        })
+
+        result = app.collect_all()
+        assert result["weekly"]["last_week"] == 0  # never the cached negative

@@ -879,10 +879,13 @@ def collect_all():
         fresh_reset = claude_usage["weekly_reset"]
         stored_reset = weekly_data.get("weekly_reset_at", "")
 
-        # Reset has moved forward -- rotate weeks
+        # Reset has moved forward -- rotate weeks. Clamp the delta to >=0 because
+        # a baseline > combined_saved means combined_saved has shrunk (upstream tool
+        # reset, new field semantics in a dashboard upgrade, etc). The user-facing
+        # "Saved Last Week" must never go negative.
         if fresh_reset != stored_reset and stored_reset:
             baseline = weekly_data.get("current_week_baseline", 0)
-            weekly_data["last_week_savings"] = combined_saved - baseline
+            weekly_data["last_week_savings"] = max(0, combined_saved - baseline)
             weekly_data["last_week_end"] = stored_reset
             weekly_data["current_week_baseline"] = combined_saved
             weekly_data["current_week_start"] = stored_reset
@@ -896,8 +899,18 @@ def collect_all():
             weekly_data["last_week_savings"] = 0
             _save_weekly_cache(weekly_data)
 
-    this_week_savings = combined_saved - weekly_data.get("current_week_baseline", combined_saved)
-    last_week_savings = weekly_data.get("last_week_savings", 0)
+    # Same clamp for this-week. If the stored baseline is suddenly larger than
+    # combined_saved (dashboard upgrade resetting Headroom's accounting basis,
+    # upstream tool wipe, etc), re-snapshot the baseline so the user sees 0
+    # rather than a giant negative number.
+    raw_this_week = combined_saved - weekly_data.get("current_week_baseline", combined_saved)
+    if raw_this_week < 0:
+        weekly_data["current_week_baseline"] = combined_saved
+        weekly_data["last_week_savings"] = 0
+        _save_weekly_cache(weekly_data)
+        raw_this_week = 0
+    this_week_savings = raw_this_week
+    last_week_savings = max(0, weekly_data.get("last_week_savings", 0))
 
     # Burn rate: savings per day this week
     week_start = weekly_data.get("current_week_start")
@@ -1120,7 +1133,7 @@ body {
     font-weight: bold;
 }
 .header-centre {
-    color: #888;
+    color: #aaa;
     font-size: 13px;
 }
 .header-centre span {
@@ -1128,7 +1141,7 @@ body {
     font-weight: bold;
 }
 .header-right {
-    color: #666;
+    color: #9aa;
     font-size: 13px;
 }
 
@@ -1147,7 +1160,12 @@ body {
     transition: opacity 0.3s;
     min-width: 0;
 }
-.card.inactive { opacity: 0.5; }
+/* Don't use opacity for inactive — it halves contrast and pushes every text
+   colour in the card below AA. The empty state ("no datasets yet" subtitle,
+   "--" value, no sparkline) already telegraphs inactivity. Border desaturation
+   keeps the visual cue without crushing readability. */
+.card.inactive { border-color: #14141e; }
+.card.inactive .card-value { color: #555; }
 .card-header {
     display: flex;
     justify-content: space-between;
@@ -1165,8 +1183,8 @@ body {
 }
 .card-name:hover { color: #fff; }
 .card-version {
-    color: #555;
-    font-size: 10px;
+    color: #9aa;
+    font-size: 11px;
 }
 .card-value {
     font-size: 28px;
@@ -1176,7 +1194,7 @@ body {
 }
 .card-sub {
     font-size: 12px;
-    color: #777;
+    color: #aaa;
     margin-bottom: 10px;
 }
 .progress-track {
@@ -1197,13 +1215,13 @@ body {
     font-size: 11px;
     margin-bottom: 8px;
 }
-.card-stats .label { color: #888; }
-.card-stats .val { color: #aaa; }
+.card-stats .label { color: #9aa; }
+.card-stats .val { color: #cdd; }
 .sparkline-container { margin-bottom: 6px; }
 .sparkline-container svg { width: 100%; height: 35px; }
 .card-delta {
     font-size: 12px;
-    color: #555;
+    color: #9aa;
 }
 .card-delta.active {
     color: #00ff88;
@@ -1282,7 +1300,7 @@ body {
     letter-spacing: 2px;
 }
 .feed-count {
-    color: #555;
+    color: #9aa;
     font-size: 12px;
 }
 .feed-area {
@@ -1294,6 +1312,29 @@ body {
     font-size: 13px;
     line-height: 2.1;
     padding: 10px 16px;
+}
+/* Scrollable region must be focusable for keyboard users (WCAG 2.1.1 A).
+   tabindex=0 in markup; this gives them a visible focus ring. */
+.feed-area:focus-visible {
+    outline: 2px solid #00ff88;
+    outline-offset: -2px;
+}
+/* Mobile: stack the command text below the timestamp+tool row so it doesn't
+   compress to zero width. Without this, the cmd column at <480px is invisible. */
+@media (max-width: 480px) {
+    .feed-line {
+        flex-wrap: wrap;
+        column-gap: 8px;
+        row-gap: 2px;
+        padding: 6px 0 6px 14px;
+        line-height: 1.5;
+    }
+    .feed-cmd {
+        flex-basis: 100%;
+        order: 5;             /* render after time + tool + savings */
+        color: #cdd;
+        font-size: 12px;
+    }
 }
 .feed-area::-webkit-scrollbar {
     width: 6px;
@@ -1316,7 +1357,7 @@ body {
     padding-left: 14px;
 }
 .feed-time {
-    color: #666;
+    color: #9aa;
     min-width: 70px;
     flex-shrink: 0;
 }
@@ -1338,12 +1379,19 @@ body {
     flex-shrink: 0;
 }
 .feed-savings.positive { color: #00ff88; }
-.feed-savings.zero { color: #444; }
-.feed-savings.info { color: #888; }
+.feed-savings.zero { color: #888; }
+.feed-savings.info { color: #aaa; }
+/* "Muted" rows are no-savings entries — visually de-emphasised, but they must
+   still meet WCAG AA contrast for screen-reader and low-vision users. Use a
+   smaller font size + de-saturated colour tokens instead of opacity, which
+   blends with the background and crushes contrast. */
 .feed-line.muted {
     font-size: 12px;
-    opacity: 0.6;
 }
+.feed-line.muted .feed-time { color: #8898a0; }
+.feed-line.muted .feed-cmd  { color: #a8b0b8; }
+.feed-line.muted .feed-savings.zero,
+.feed-line.muted .feed-savings.info { color: #a8b0b8; }
 .feed-line.highlight {
     border-left-color: currentColor;
 }
@@ -1371,10 +1419,24 @@ body {
     padding: 6px 0;
     margin-bottom: 16px;
     font-size: 13px;
-    color: #889;
+    color: #aab;
 }
 .ticker .sep {
-    color: #556;
+    color: #889;
+}
+/* Screen-reader-only utility class so axe-core / SRs see a document h1 even
+   though the visible design intentionally uses the "CLAUDE TOOLS" wordmark
+   as a link rather than a heading. */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 .ticker .tv {
     color: #00bfff;
@@ -1395,14 +1457,16 @@ body {
 </head>
 <body>
 <!-- Header -->
-<div class="header">
+<header class="header" role="banner">
+    <h1 class="sr-only">Claude Tools Dashboard</h1>
     <a class="header-left" href="https://github.com/Will-Luck/claude-tools-dashboard" target="_blank" rel="noopener noreferrer" title="View source on GitHub">
         <div class="pulse-dot" id="health-pulse" title="All collectors healthy"></div>
         <div class="header-title">CLAUDE TOOLS</div>
     </a>
     <div class="header-centre" id="combined">COMBINED: <span>0</span> tokens saved</div>
     <div class="header-right" id="clock">--:--:-- &blacksquare; -- --- ----</div>
-</div>
+</header>
+<main role="main" aria-label="Tool savings dashboard">
 
 <!-- Stats Ticker -->
 <div class="ticker" id="ticker">
@@ -1513,13 +1577,15 @@ body {
         <span class="feed-title">LIVE ACTIVITY</span>
         <span class="feed-count">showing last 0</span>
     </div>
-    <div class="feed-area" id="feed"></div>
+    <div class="feed-area" id="feed" tabindex="0" role="log" aria-live="polite" aria-label="Live activity feed: recent token-saving events"></div>
 </div>
+</main>
 
 <script>
 function formatTokens(n, withUnit) {
-    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
-    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
     if (withUnit) return n + ' tokens';
     return String(n);
 }

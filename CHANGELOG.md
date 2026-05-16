@@ -6,6 +6,62 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-05-16
+
+### Fixed
+
+- **"Saved Last Week: -5,072,457,996 tokens" production bug** (closes #3).
+  When a baseline value stored by an older dashboard version was larger than
+  the current `combined_saved`, the weekly rotation arithmetic produced a
+  giant negative number that was displayed to the user as if real. Two
+  guards:
+  - rotation clamps `last_week_savings = max(0, combined_saved - baseline)`
+  - per-tick clamp re-snapshots the baseline whenever the running delta
+    goes negative, so a legacy cache file with a -5B value heals on the
+    next tick instead of leaking forever
+- **WCAG 2 AA colour-contrast across the whole UI** — header centre/right,
+  card version, card subtitle, card stats, feed time/cmd/count, and ticker
+  separator all moved from 2.5-4.2:1 grays to 4.5:1+ tokens (`#9aa`, `#aab`,
+  `#cdd`, `#aaa`). axe-core scan: 5 violations -> 0.
+- **Inactive cards no longer crush their own contrast.** Was `opacity: 0.5`
+  on `.card.inactive` which halved the rendered luminance of every text in
+  the card (e.g. jDataMunch's "JDATAMUNCH" label rendered at 2.48:1 on
+  `#0e0e16`). Replaced with a desaturated border + explicit dimmer value
+  colour, so the inactive cue stays visible without breaking AA.
+- **Muted feed rows** had the same `opacity: 0.6` issue, dropping feed time,
+  tool labels, and saving values below AA. Same treatment: opacity gone,
+  dimmer colour tokens applied per element.
+- **Live activity feed is now keyboard-accessible.** `#feed` had
+  `overflow: auto` but no `tabindex`, so keyboard-only users couldn't scroll
+  through history. Added `tabindex="0"`, `role="log"`, `aria-live="polite"`,
+  and a `:focus-visible` outline. WCAG 2.1.1 A.
+- **Mobile feed (≤480px) is now readable.** Previously the command column
+  compressed to zero width on phones, so users saw timestamps + tool labels
+  but no command text. Rows now wrap with the command on its own line.
+
+### Added
+
+- **Document landmarks for screen readers.** Visually-hidden `<h1>`, wrapped
+  body in `<main role="main">`, header is now `<header role="banner">`. Axe's
+  `landmark-one-main`, `page-has-heading-one`, and `region` violations cleared.
+
+### Changed
+
+- `formatTokens()` now formats billions as `5.1B` instead of `5078.0M`.
+  Headroom's lifetime number was wrapping past three significant digits.
+
+### Tests
+
+- 3 new tests for weekly-savings clamping (rotation never negative, per-tick
+  baseline re-snapshot, legacy negative cache file is healed on read).
+  Total suite: 78 -> 81 passing.
+
+### Notes
+
+- Findings sourced from a live audit of https://tools.lucknet.uk/ on
+  2026-05-16. Audit checkpoint at /tmp/ui-audit-ctd-1747438800.md;
+  consolidated report filed as Gitea issue #3 with before/after screenshots.
+
 ## [1.3.0] - 2026-05-16
 
 ### Fixed
