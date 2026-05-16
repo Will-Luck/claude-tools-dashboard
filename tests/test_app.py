@@ -660,3 +660,228 @@ class TestWeeklyCacheRotation:
         assert cache["weekly_reset_at"] == stored_reset
         assert cache["last_week_savings"] == 42
         assert "last_week_end" not in cache  # set only on rotation
+
+
+# ======================================================================
+# TestHeadroomLifetime — v1.3.0: Headroom shows lifetime, not session
+# ======================================================================
+
+
+class FakeResp:
+    """Minimal context-manager that mimics urlopen()."""
+
+    def __init__(self, payload):
+        import json as _json
+        self._body = _json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def read(self):
+        return self._body
+
+
+class TestHeadroomLifetime:
+    """Pre-v1.3.0 the card read tokens.saved (session only). v1.3.0 reads lifetime."""
+
+    def _payload(self, lifetime_tokens, lifetime_usd, hit_rate, cache_usd, session_tokens):
+        return {
+            "tokens": {"saved": session_tokens, "savings_percent": 6.2},
+            "compression_cache": {"active_sessions": 1},
+            "persistent_savings": {
+                "lifetime": {
+                    "tokens_saved": lifetime_tokens,
+                    "compression_savings_usd": lifetime_usd,
+                    "requests": 29520,
+                }
+            },
+            "prefix_cache": {
+                "totals": {"hit_rate": hit_rate, "savings_usd": cache_usd}
+            },
+        }
+
+    def _patch_urls(self, monkeypatch, stats_payload):
+        # Two urlopen() calls: /health then /stats. First returns version, second
+        # returns the rich stats payload.
+        calls = {"i": 0}
+
+        def fake_urlopen(url, timeout=2):
+            calls["i"] += 1
+            if calls["i"] == 1:
+                return FakeResp({"version": "0.5.25", "status": "healthy"})
+            return FakeResp(stats_payload)
+
+        monkeypatch.setattr(app, "urlopen", fake_urlopen)
+
+    def test_lifetime_overrides_session(self, monkeypatch):
+        """total_saved must come from persistent_savings.lifetime when populated."""
+        self._patch_urls(monkeypatch, self._payload(5_072_499_735, 25324.61, 89.4, 13.66, 23236))
+        app._headroom_last_total = 0
+        app._headroom_history = []
+        result = app.collect_headroom()
+        assert result["active"] is True
+        assert result["total_saved"] == 5_072_499_735
+        assert result["lifetime_saved"] == 5_072_499_735
+        assert result["lifetime_savings_usd"] == 25324.61
+        assert result["session_saved"] == 23236
+        assert result["cache_hit_rate"] == 89.4
+        assert result["cache_savings_usd"] == 13.66
+
+    def test_fallback_to_session_when_lifetime_empty(self, monkeypatch):
+        """Fresh Headroom install: lifetime is zero, so use session value."""
+        self._patch_urls(monkeypatch, self._payload(0, 0, None, 0, 23236))
+        app._headroom_last_total = 0
+        app._headroom_history = []
+        result = app.collect_headroom()
+        assert result["total_saved"] == 23236
+        assert result["lifetime_saved"] == 0
+        assert result["session_saved"] == 23236
+
+    def test_cache_hit_rate_can_be_null(self, monkeypatch):
+        """If Headroom hasn't seen a cache hit yet, hit_rate is None — not 0."""
+        self._patch_urls(monkeypatch, self._payload(100, 1.0, None, 0, 50))
+        app._headroom_last_total = 0
+        app._headroom_history = []
+        result = app.collect_headroom()
+        assert result["cache_hit_rate"] is None
+
+
+# ======================================================================
+# TestUsageFromHeadroom — v1.3.0: skip Anthropic API when Headroom has the data
+# ======================================================================
+
+
+class TestUsageFromHeadroom:
+    """_usage_from_headroom() avoids a redundant call to /oauth/usage."""
+
+    def _stats_with_window(self, fh_pct, sd_pct, sonnet_pct):
+        return {
+            "subscription_window": {
+                "latest": {
+                    "five_hour": {"utilization_pct": fh_pct, "resets_at": "2026-05-17T00:50:00Z"},
+                    "seven_day": {"utilization_pct": sd_pct, "resets_at": "2026-05-18T22:00:00Z"},
+                    "seven_day_sonnet": {"utilization_pct": sonnet_pct, "resets_at": None},
+                }
+            }
+        }
+
+    def test_reads_subscription_window(self, monkeypatch):
+        payload = self._stats_with_window(7.0, 28.0, 0.0)
+        monkeypatch.setattr(app, "urlopen", lambda *a, **k: FakeResp(payload))
+        result = app._usage_from_headroom()
+        assert result is not None
+        assert result["source"] == "headroom"
+        assert result["session_pct"] == 7.0
+        assert result["weekly_pct"] == 28.0
+        assert result["sonnet_pct"] == 0.0
+
+    def test_returns_none_when_no_subscription_data(self, monkeypatch):
+        monkeypatch.setattr(app, "urlopen", lambda *a, **k: FakeResp({}))
+        assert app._usage_from_headroom() is None
+
+    def test_returns_none_when_urlopen_fails(self, monkeypatch):
+        def boom(*a, **k):
+            raise OSError("connection refused")
+        monkeypatch.setattr(app, "urlopen", boom)
+        assert app._usage_from_headroom() is None
+
+    def test_collect_usage_prefers_headroom(self, monkeypatch):
+        """When Headroom is reachable, no OAuth call is made."""
+        payload = self._stats_with_window(7.0, 28.0, 5.0)
+        monkeypatch.setattr(app, "urlopen", lambda *a, **k: FakeResp(payload))
+
+        def must_not_call(*a, **k):
+            raise AssertionError("OAuth fallback was used despite Headroom being available")
+
+        monkeypatch.setattr(app, "_read_oauth_token", must_not_call)
+        app._usage_cache = {}
+        app._usage_cache_time = 0
+        result = app.collect_claude_usage()
+        assert result["session_pct"] == 7.0
+        assert result["source"] == "headroom"
+
+
+# ======================================================================
+# TestOverallHealth — v1.3.0: header pulse-dot reflects worst-tool health
+# ======================================================================
+
+
+class TestOverallHealth:
+    """Smoke: collect_all() emits overall_health derived from per-tool health.
+
+    Per-tool health is computed from _last_collect_success timestamps inside collect_all:
+      - ok:    active AND last_success > 0 AND age < 60s
+      - stale: last_success > 0 but stale OR active=False
+      - error: last_success == 0 (never succeeded)
+    """
+
+    def _stub_all_collectors(self, monkeypatch, active=True):
+        """Return active stubs so collect_all populates results without network."""
+        stub = lambda: {"active": active, "total_saved": 0, "history": []}
+        for name in ("rtk", "headroom", "jcodemunch", "jdocmunch", "jdatamunch"):
+            monkeypatch.setattr(app, f"collect_{name}", stub)
+        monkeypatch.setattr(app, "collect_claude_usage", lambda: {"active": False})
+
+    def test_all_ok(self, monkeypatch):
+        self._stub_all_collectors(monkeypatch, active=True)
+        result = app.collect_all()
+        assert result["overall_health"] == "ok"
+
+    def test_any_stale_yields_stale(self, monkeypatch):
+        """active=False with prior success → stale per the function logic."""
+        self._stub_all_collectors(monkeypatch, active=True)
+        # Force one tool to be inactive but with prior success in the past
+        import time as _time
+        app._last_collect_success["jcodemunch"] = _time.time() - 5
+        monkeypatch.setattr(
+            app, "collect_jcodemunch",
+            lambda: {"active": False, "total_saved": 0, "history": []},
+        )
+        result = app.collect_all()
+        assert result["overall_health"] == "stale"
+
+    def test_any_error_yields_error(self, monkeypatch):
+        """Collector returns None AND has no prior success → error."""
+        self._stub_all_collectors(monkeypatch, active=True)
+        # Reset the success ledger to make jdatamunch look brand-new and broken
+        app._last_collect_success.pop("jdatamunch", None)
+        monkeypatch.setattr(app, "collect_jdatamunch", lambda: None)
+        # _last_good must also be empty so it falls back to default-inactive shape
+        app._last_good.pop("jdatamunch", None)
+        result = app.collect_all()
+        assert result["overall_health"] == "error"
+
+
+# ======================================================================
+# TestApiStats — v1.3.0: /api/stats returns snapshot JSON
+# ======================================================================
+
+
+class TestApiStats:
+    """The new pull-style JSON endpoint."""
+
+    def test_api_stats_returns_dict(self, monkeypatch):
+        # Pre-populate the collector snapshot so we don't need a live tick.
+        app._collector._snapshot = {
+            "combined_saved": 12345,
+            "combined_saved_usd": 1.23,
+            "overall_health": "ok",
+            "timestamp": "2026-05-16T00:00:00+00:00",
+        }
+        client = app.app.test_client()
+        resp = client.get("/api/stats")
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["combined_saved"] == 12345
+        assert body["combined_saved_usd"] == 1.23
+        assert body["overall_health"] == "ok"
+
+    def test_api_stats_empty_snapshot(self, monkeypatch):
+        app._collector._snapshot = None
+        client = app.app.test_client()
+        resp = client.get("/api/stats")
+        assert resp.status_code == 200
+        assert resp.get_json() == {}

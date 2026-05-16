@@ -6,21 +6,63 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-16
+
+### Fixed
+
+- **Headroom card was understating savings by 5 orders of magnitude.** The
+  card read `tokens.saved` from `/stats`, which is the **session-only**
+  counter that resets after 60 minutes of inactivity. The dashboard's
+  headline metric is token savings, but Headroom's lifetime contribution
+  (`persistent_savings.lifetime.tokens_saved`) was ignored — so a typical
+  user saw ~20K tokens displayed when the real lifetime value was ~5B.
+  Now reads lifetime as the headline; session is exposed as `session_saved`
+  for consumers that want it.
+
 ### Added
 
-- **jDataMunch tile** (5th tool card). Mirrors jCodeMunch / jDocMunch:
-  reads `~/.data-index/_savings.json` for total tokens saved, counts
-  indexed datasets (JSON + DB files), tracks freshness, and feeds the
-  shared sparkline and activity feed pipeline. Teal accent (`#1dd1a1`)
-  keeps the palette distinct from the other four tools.
+- **Headroom card now shows real dollar savings.** Pulls
+  `persistent_savings.lifetime.compression_savings_usd` (compression discount)
+  and `prefix_cache.totals.savings_usd` (provider cache-read discount, the
+  90%-off line on Anthropic's pricing page). On a moderately active homelab
+  this surfaces tens of thousands of dollars of accumulated savings that
+  were previously invisible.
+- **Header pulse-dot reflects worst-tool health.** Was always green; now
+  turns amber on "stale" and red on "error" so glanceable status works.
+- **Cache-hit-rate stat on Headroom card.** Surfaces
+  `prefix_cache.totals.hit_rate` alongside sessions. Useful for diagnosing
+  CacheAligner effectiveness without `curl /stats`.
+- **Saved $ chip in the stats ticker.** Sums Headroom compression + cache
+  savings into one headline figure (k-formatted at >=$1000).
+- **`/api/stats` pull endpoint.** Returns the same snapshot SSE emits,
+  as a one-shot JSON response. For Gotify scripts, status bars, and
+  Prometheus exporters that don't want to hold an SSE connection open.
+- **jDataMunch tile** (5th tool card; merged from 1.2.3-Unreleased). Mirrors
+  jCodeMunch / jDocMunch: reads `~/.data-index/_savings.json`, counts
+  indexed datasets (JSON + DB files), tracks freshness, and feeds the shared
+  sparkline and activity feed pipeline. Teal accent (`#1dd1a1`).
 - `JDATAMUNCH_INDEX_DIR` and `JDATAMUNCH_BIN` env vars (defaults
   `~/.data-index` and `jdatamunch-mcp`).
 - Version resolution falls back to `pipx list --short` because
   jdatamunch-mcp 0.8.4 prints argparse usage on `--version` and exits
   non-zero.
 - "no datasets yet" placeholder so the card renders cleanly with the
-  correct version label even before the first MCP call creates the
-  index dir.
+  correct version label even before the first MCP call creates the index dir.
+
+### Changed
+
+- **`collect_claude_usage` now prefers Headroom over a direct Anthropic API
+  call.** Headroom already polls `/oauth/usage` on a tight schedule and
+  caches the result in `subscription_window.latest`. Reading from there
+  means: no OAuth token needed, no 429 risk, fresher data. The direct call
+  is now a fallback for when Headroom is unreachable. Each response carries
+  a `source: "headroom" | "anthropic"` field so the origin is auditable.
+
+### Tests
+
+- 12 new tests covering the lifetime accounting fix, the Headroom
+  subscription window fallback, the overall-health rollup, and the
+  new `/api/stats` endpoint. Total suite: 78 passing.
 
 ## [1.2.2] - 2026-04-17
 

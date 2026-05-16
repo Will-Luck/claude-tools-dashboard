@@ -250,22 +250,37 @@ def collect_headroom():
             resp = urlopen(f"{HEADROOM_URL}/stats", timeout=2)
             data = json.loads(resp.read().decode())
 
-            # Map nested headroom fields to the flat names the frontend expects
-            savings = data.get("savings", {})
+            # Headroom exposes both session and lifetime metrics. Session tokens reset
+            # on inactivity (rollover_inactivity_minutes=60 by default) so display_session
+            # rarely matches the headline value users expect. Use lifetime as primary.
             tokens = data.get("tokens", {})
             cache = data.get("compression_cache", {})
+            lifetime = data.get("persistent_savings", {}).get("lifetime", {}) or {}
+            prefix_totals = data.get("prefix_cache", {}).get("totals", {}) or {}
 
             data["active"] = True
             data["version"] = version or "unknown"
-            # Use compression-only savings (not savings.total_tokens which includes RTK)
-            data["total_saved"] = tokens.get("saved", 0)
+
+            lifetime_saved = lifetime.get("tokens_saved", 0) or 0
+            session_saved = tokens.get("saved", 0) or 0
+            data["total_saved"] = lifetime_saved if lifetime_saved > 0 else session_saved
+            data["session_saved"] = session_saved
+            data["lifetime_saved"] = lifetime_saved
+            data["lifetime_savings_usd"] = round(lifetime.get("compression_savings_usd", 0) or 0, 2)
+            data["lifetime_requests"] = lifetime.get("requests", 0) or 0
+
+            # Prefix cache stats are SDK/provider-side hits (cache_read_tokens). Headroom
+            # surfaces them so we can attribute the dollar discount.
+            data["cache_hit_rate"] = prefix_totals.get("hit_rate")
+            data["cache_savings_usd"] = round(prefix_totals.get("savings_usd", 0) or 0, 2)
+
             data["sessions"] = cache.get("active_sessions", 0)
             data["avg_savings_pct"] = round(tokens.get("savings_percent", 0), 1)
             data["compression_ratio"] = data["avg_savings_pct"]
 
-            # Accumulate headroom events in a rolling buffer
+            # Sparkline uses session deltas (current activity), not lifetime.
             global _headroom_last_total, _headroom_history
-            current_total = data["total_saved"]
+            current_total = session_saved
             if _headroom_last_total > 0 and current_total > _headroom_last_total:
                 delta = current_total - _headroom_last_total
                 _headroom_history.append({
@@ -275,7 +290,7 @@ def collect_headroom():
                     "saved_tokens": delta,
                     "saved_pct": data["avg_savings_pct"],
                 })
-                _headroom_history = _headroom_history[-100:]  # keep last 100
+                _headroom_history = _headroom_history[-100:]
             _headroom_last_total = current_total
             data["history"] = list(_headroom_history)
 
@@ -623,13 +638,55 @@ def _scrubbed_cache_snapshot():
     return _scrub_stale_windows(dict(_usage_cache))
 
 
+def _usage_from_headroom():
+    """Read subscription window from Headroom /stats — no OAuth, no 429 risk.
+
+    Headroom polls /oauth/usage and caches the result. When Headroom is reachable
+    we prefer its cached snapshot over a direct API call: no token required and
+    the 429 budget stays untouched.
+    """
+    try:
+        resp = urlopen(f"{HEADROOM_URL}/stats", timeout=2)
+        data = json.loads(resp.read().decode())
+        latest = (data.get("subscription_window") or {}).get("latest") or {}
+        if not latest:
+            return None
+        result = {"active": True, "source": "headroom"}
+        for pct_key, reset_key, api_block in _USAGE_WINDOW_KEYS:
+            block = latest.get(api_block) or {}
+            # Headroom mirrors the API field as utilization_pct (renamed) — fall back
+            # to utilization for older Headroom builds.
+            pct = block.get("utilization_pct")
+            if pct is None:
+                pct = block.get("utilization")
+            result[pct_key] = pct
+            result[reset_key] = block.get("resets_at")
+        # Result is meaningful only if at least one window has a percentage.
+        if any(result.get(k) is not None for k, _, _ in _USAGE_WINDOW_KEYS):
+            return result
+        return None
+    except (URLError, OSError, json.JSONDecodeError, KeyError):
+        return None
+
+
 def collect_claude_usage():
-    """Fetch Claude usage from Anthropic API with 3-minute cache."""
+    """Fetch Claude subscription usage. Headroom first, Anthropic API as fallback.
+
+    Cache lives for USAGE_POLL_INTERVAL (180s). On 429 the cache is held for
+    USAGE_BACKOFF (300s) to avoid hammering the upstream.
+    """
     global _usage_cache, _usage_cache_time
 
     now = time.time()
     if _usage_cache and (now - _usage_cache_time) < USAGE_POLL_INTERVAL:
         return _scrubbed_cache_snapshot()
+
+    # Try Headroom first — it polls /oauth/usage on a tight schedule and caches the result.
+    hr_result = _usage_from_headroom()
+    if hr_result is not None:
+        _usage_cache = hr_result
+        _usage_cache_time = now
+        return _scrub_stale_windows(dict(hr_result))
 
     token = _read_oauth_token()
     if not token:
@@ -643,7 +700,7 @@ def collect_claude_usage():
         with urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
 
-        result = {"active": True}
+        result = {"active": True, "source": "anthropic"}
         for pct_key, reset_key, api_block in _USAGE_WINDOW_KEYS:
             block = data.get(api_block) or {}
             result[pct_key] = block.get("utilization")
@@ -651,11 +708,9 @@ def collect_claude_usage():
 
         _usage_cache = result
         _usage_cache_time = now
-        # Return a scrubbed copy so the cache stays raw and authoritative.
         return _scrub_stale_windows(dict(result))
     except HTTPError as e:
         if e.code == 429:
-            # Back off on rate limit -- extend cache validity
             _usage_cache_time = now - USAGE_POLL_INTERVAL + USAGE_BACKOFF
         return _scrubbed_cache_snapshot()
     except Exception:
@@ -789,11 +844,32 @@ def collect_all():
         else:
             results[name]["health"] = "error"
 
-    # Build combined saved total
+    # Build combined saved total. Each tool's total_saved is now its lifetime number,
+    # so this sums lifetime tokens saved across the entire stack.
     combined_saved = 0
     for name in collectors:
         tool_data = results[name]
         combined_saved += tool_data.get("total_saved", 0)
+
+    # Combined dollar value. Headroom is the only collector that knows real cost:
+    #   - compression_savings_usd: tokens removed before the request was billed
+    #   - cache_savings_usd:       cache-read discount (90% off) on input tokens
+    # Both are attributable to running Headroom; sum them for the headline figure.
+    headroom_data = results.get("headroom", {})
+    combined_saved_usd = round(
+        (headroom_data.get("lifetime_savings_usd", 0) or 0)
+        + (headroom_data.get("cache_savings_usd", 0) or 0),
+        2,
+    )
+
+    # Worst-health rollup drives the header pulse-dot colour.
+    health_states = [results[n].get("health", "error") for n in collectors]
+    if any(h == "error" for h in health_states):
+        overall_health = "error"
+    elif any(h == "stale" for h in health_states):
+        overall_health = "stale"
+    else:
+        overall_health = "ok"
 
     # Weekly savings tracking
     claude_usage = collect_claude_usage()
@@ -907,6 +983,8 @@ def collect_all():
     return {
         "timestamp": timestamp,
         "combined_saved": combined_saved,
+        "combined_saved_usd": combined_saved_usd,
+        "overall_health": overall_health,
         "rtk": results["rtk"],
         "headroom": results["headroom"],
         "jcodemunch": results["jcodemunch"],
@@ -1013,10 +1091,27 @@ body {
     border-radius: 50%;
     background: #00ff88;
     animation: pulse 2s infinite;
+    transition: background 0.3s, box-shadow 0.3s;
+}
+.pulse-dot.health-stale {
+    background: #ffaa00;
+    animation: pulse-stale 2s infinite;
+}
+.pulse-dot.health-error {
+    background: #ff5577;
+    animation: pulse-error 1.2s infinite;
 }
 @keyframes pulse {
     0%, 100% { opacity: 1; box-shadow: 0 0 4px #00ff88; }
     50% { opacity: 0.4; box-shadow: 0 0 1px #00ff88; }
+}
+@keyframes pulse-stale {
+    0%, 100% { opacity: 1; box-shadow: 0 0 4px #ffaa00; }
+    50% { opacity: 0.4; box-shadow: 0 0 1px #ffaa00; }
+}
+@keyframes pulse-error {
+    0%, 100% { opacity: 1; box-shadow: 0 0 6px #ff5577; }
+    50% { opacity: 0.5; box-shadow: 0 0 2px #ff5577; }
 }
 .header-title {
     color: #00ff88;
@@ -1302,7 +1397,7 @@ body {
 <!-- Header -->
 <div class="header">
     <a class="header-left" href="https://github.com/Will-Luck/claude-tools-dashboard" target="_blank" rel="noopener noreferrer" title="View source on GitHub">
-        <div class="pulse-dot"></div>
+        <div class="pulse-dot" id="health-pulse" title="All collectors healthy"></div>
         <div class="header-title">CLAUDE TOOLS</div>
     </a>
     <div class="header-centre" id="combined">COMBINED: <span>0</span> tokens saved</div>
@@ -1324,6 +1419,8 @@ body {
     <span title="Claude usage across your 7-day rolling period">Weekly: <span id="tk-weekly-pct" class="tv">--</span></span>
     <span class="sep">|</span>
     <span title="Sonnet-only usage across your 7-day rolling period">Sonnet: <span id="tk-sonnet-pct" class="tv">--</span></span>
+    <span class="sep">|</span>
+    <span title="Headroom lifetime dollar savings (compression + provider prefix-cache discount)">Saved $: <span class="tv" id="tk-combined-usd">--</span></span>
 </div>
 
 <!-- Cards -->
@@ -1533,6 +1630,30 @@ function updateDashboard(d) {
         sonnetEl.className = 'tv';
     }
 
+    // Combined dollar savings (compression + provider prefix-cache discount).
+    var combinedUsdEl = document.getElementById('tk-combined-usd');
+    if (combinedUsdEl) {
+        var usd = d.combined_saved_usd || 0;
+        if (usd >= 1000) {
+            combinedUsdEl.textContent = '$' + (usd / 1000).toFixed(1) + 'k';
+        } else if (usd > 0) {
+            combinedUsdEl.textContent = '$' + usd.toFixed(2);
+        } else {
+            combinedUsdEl.textContent = '--';
+        }
+        combinedUsdEl.className = 'tv';
+    }
+
+    // Worst-tool health drives the header pulse-dot.
+    var pulseDot = document.getElementById('health-pulse');
+    if (pulseDot) {
+        var oh = d.overall_health || 'ok';
+        pulseDot.className = 'pulse-dot' + (oh !== 'ok' ? ' health-' + oh : '');
+        pulseDot.title = oh === 'ok'
+            ? 'All collectors healthy'
+            : (oh === 'stale' ? 'One or more collectors stale' : 'One or more collectors in error');
+    }
+
     // RTK
     var rtk = d.rtk || {};
     var rtkCard = document.getElementById('rtk-card');
@@ -1561,11 +1682,24 @@ function updateDashboard(d) {
     if (hrDot) hrDot.className = 'health-dot health-' + hrHealth;
     document.getElementById('headroom-version').textContent = shortVersion(hr.version);
     if (hr.active) {
+        // Lifetime is the headline; persistent_savings.lifetime survives proxy restarts
+        // and matches the "$X saved" claim users care about. Session-only fallback
+        // applies when Headroom is fresh (lifetime accumulator not yet populated).
         document.getElementById('headroom-value').textContent = formatTokens(hr.total_saved || 0);
-        document.getElementById('headroom-sub').textContent = 'tokens saved';
+        var sub = 'tokens saved (lifetime)';
+        if (hr.lifetime_savings_usd && hr.lifetime_savings_usd > 0) {
+            sub = 'lifetime: $' + hr.lifetime_savings_usd.toFixed(2) + ' saved';
+        }
+        document.getElementById('headroom-sub').textContent = sub;
         document.getElementById('headroom-bar').style.width = (hr.compression_ratio || hr.avg_savings_pct || 0) + '%';
-        document.getElementById('headroom-stats').innerHTML =
-            '<span><span class="label">sessions</span> <span class="val">' + (hr.sessions || 0) + '</span></span>';
+        var hrStats = '<span><span class="label">sessions</span> <span class="val">' + (hr.sessions || 0) + '</span></span>';
+        if (hr.cache_hit_rate != null) {
+            hrStats += '<span><span class="label">cache hit</span> <span class="val">' + hr.cache_hit_rate + '%</span></span>';
+        }
+        if (hr.cache_savings_usd && hr.cache_savings_usd > 0) {
+            hrStats += '<span><span class="label">cache $</span> <span class="val">$' + hr.cache_savings_usd.toFixed(2) + '</span></span>';
+        }
+        document.getElementById('headroom-stats').innerHTML = hrStats;
     } else {
         document.getElementById('headroom-value').textContent = '--';
         document.getElementById('headroom-sub').textContent = 'awaiting first session';
@@ -1741,6 +1875,18 @@ def index():
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/stats")
+def api_stats():
+    """Pull-style JSON snapshot. Same shape as SSE payloads, single response.
+
+    For programmatic consumers (Gotify scripts, Prometheus exporters, status bars)
+    that don't want to hold an SSE connection open. Snapshot age is bounded by
+    COLLECTOR_INTERVAL (~0.25s by default).
+    """
+    payload = _collector.snapshot() or {}
+    return jsonify(payload)
 
 
 @app.route("/events")
