@@ -6,6 +6,69 @@ project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-05-30
+
+### Added
+
+- **Prometheus `/metrics` endpoint.** Text exposition (v0.0.4) of combined and
+  per-tool token savings, per-tool collector health (`ctd_tool_health`), Claude
+  subscription usage percentages, weekly savings, daily burn rate, and a
+  `ctd_snapshot_timestamp_seconds` gauge for staleness alerting. Pure formatting
+  over the existing snapshot, no new dependencies; complements `/api/stats` for
+  scrapers that prefer the Prometheus format.
+- **`HOST` environment variable** (default `0.0.0.0`) for the bind address. Set
+  `127.0.0.1` to expose the dashboard only behind a reverse proxy.
+
+### Fixed
+
+- **Live activity feed no longer snaps to the top every push.** A full
+  `innerHTML` rebuild on each SSE tick discarded the user's scroll position, so
+  older entries could never be read. The feed now pauses its rebuild while the
+  user has scrolled down (showing a "scroll up to resume" hint) and resumes when
+  they return to the top.
+- **SSE disconnects are now visible.** When the event stream drops, the header
+  pulse-dot turns red with a "Live feed disconnected" tooltip instead of the
+  board silently freezing on stale data under a green "healthy" dot. A staleness
+  watchdog also flags a frozen board when no message arrives for 15 s even if the
+  connection stays open. State clears automatically on reconnect.
+- **`Saved Last Week` showed `--` for a genuine zero.** A truthy check treated a
+  real `0` as "no data"; it now distinguishes `0` from missing, matching the
+  adjacent burn-rate field.
+- **`formatTokens` mangled negative values**, emitting an unscaled raw integer
+  (e.g. `-1500000`) inconsistent with every other figure. It now scales on the
+  magnitude and re-applies the sign (`-1.5M`).
+- **`_save_weekly_cache` is now atomic.** It wrote `weekly.json` in place, so a
+  crash or container stop mid-write left a truncated file that
+  `_load_weekly_cache` discarded, silently resetting the weekly baseline and
+  last-week total to zero. The snapshot is now written to a temp file and
+  `os.replace()`d into place.
+- **Time-bomb test fixture.** `TestUsageFromHeadroom` hardcoded reset timestamps
+  that lapsed into the past, so `collect_claude_usage`'s stale-window scrub
+  started failing the suite after the dates passed. The fixture now derives
+  resets relative to now.
+
+### Changed
+
+- Removed a redundant duplicate assignment in `collect_jcodemunch`.
+- Pinned runtime dependencies (`flask>=3.0,<4`, `python-dotenv>=1.0,<2`) for
+  reproducible builds.
+
+### Docs
+
+- Corrected the `SSE_INTERVAL` default in the README and `.env.example` (was
+  documented as `30`, lowered to `2` back in v1.2.0).
+- Documented the previously-missing `HOST`, `JDOCMUNCH_BIN`,
+  `JDATAMUNCH_INDEX_DIR`, `JDATAMUNCH_BIN`, and `COLLECTOR_INTERVAL` environment
+  variables; added jDataMunch to "What it shows" and the architecture overview;
+  added `/api/stats` and `/metrics` to the API table.
+- Restored `CHANGELOG` version link-reference definitions (had stopped at 1.2.0).
+
+### Tests
+
+- 12 new tests: Prometheus exposition rendering and route behaviour; atomic
+  weekly-cache write (round-trip, no temp-file leak, prior file survives a failed
+  write). Total suite: 81 -> 93 passing.
+
 ## [1.4.0] - 2026-05-16
 
 ### Fixed
@@ -321,6 +384,11 @@ Initial public release.
 
 - Mobile viewport scrolling.
 
+[1.5.0]: https://github.com/Will-Luck/claude-tools-dashboard/releases/tag/v1.5.0
+[1.4.0]: https://github.com/Will-Luck/claude-tools-dashboard/releases/tag/v1.4.0
+[1.3.0]: https://github.com/Will-Luck/claude-tools-dashboard/releases/tag/v1.3.0
+[1.2.2]: https://github.com/Will-Luck/claude-tools-dashboard/releases/tag/v1.2.2
+[1.2.1]: https://github.com/Will-Luck/claude-tools-dashboard/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Will-Luck/claude-tools-dashboard/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Will-Luck/claude-tools-dashboard/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Will-Luck/claude-tools-dashboard/releases/tag/v1.0.0

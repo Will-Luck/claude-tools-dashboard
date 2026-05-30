@@ -19,6 +19,7 @@ Live wallboard for monitoring token savings across your Claude Code toolchain. T
 - **Headroom** -- context compression stats from the MCP server (HTTP API)
 - **jCodeMunch** -- indexed repos and session savings (filesystem + MCP)
 - **jDocMunch** -- documentation indexing and section retrieval savings (filesystem)
+- **jDataMunch** -- indexed datasets and session savings (filesystem + MCP)
 - **Combined total** with sparkline trends and live activity feed
 - **Stats ticker** -- weekly savings breakdown, daily burn rate, Claude usage percentages (5-hour, weekly, Sonnet), and reset countdown (reads Claude Code credentials directly, no extra tools needed)
 
@@ -73,13 +74,18 @@ All settings via environment variables. Copy `.env.example` for reference:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8095` | Dashboard listen port |
+| `HOST` | `0.0.0.0` | Bind address. Set `127.0.0.1` to expose only behind a reverse proxy |
 | `HEADROOM_URL` | `http://127.0.0.1:8787` | Headroom proxy stats endpoint |
 | `RTK_DB_PATH` | `~/.local/share/rtk/history.db` | RTK SQLite database |
 | `RTK_BIN` | `rtk` | Path to RTK binary |
 | `JCODEMUNCH_INDEX_DIR` | `~/.code-index` | jCodeMunch index directory |
+| `JCODEMUNCH_BIN` | `jcodemunch-mcp` | Path to jCodeMunch binary (version check) |
 | `JDOCMUNCH_INDEX_DIR` | `~/.doc-index` | jDocMunch index directory |
-| `JCODEMUNCH_BIN` | `jcodemunch-mcp` | Path to jCodeMunch binary |
-| `SSE_INTERVAL` | `30` | Seconds between SSE pushes |
+| `JDOCMUNCH_BIN` | `jdocmunch-mcp` | Path to jDocMunch binary (version check) |
+| `JDATAMUNCH_INDEX_DIR` | `~/.data-index` | jDataMunch index directory |
+| `JDATAMUNCH_BIN` | `jdatamunch-mcp` | Path to jDataMunch binary (version check) |
+| `SSE_INTERVAL` | `2` | Seconds between SSE heartbeat pushes |
+| `COLLECTOR_INTERVAL` | `0.25` | Seconds between background collector ticks |
 | `CLAUDE_CREDENTIALS` | `~/.claude/.credentials.json` | Claude Code credentials (for usage API) |
 | `WEEKLY_CACHE_DIR` | `~/.cache/claude-tools-dashboard` | Weekly savings snapshot directory |
 
@@ -89,6 +95,8 @@ All settings via environment variables. Copy `.env.example` for reference:
 |----------|-------------|
 | `GET /` | Dashboard HTML (self-contained SPA) |
 | `GET /health` | JSON health check |
+| `GET /api/stats` | Current aggregated snapshot as JSON (one-shot, no SSE) |
+| `GET /metrics` | Prometheus text exposition (savings, per-tool health, usage, freshness) |
 | `GET /events` | SSE stream (auto-reconnects) |
 
 ## Architecture
@@ -97,11 +105,11 @@ Single-file Flask app (`app.py`) that:
 
 1. Polls RTK's SQLite database for command history and savings
 2. Queries Headroom's HTTP stats API for compression data
-3. Reads jCodeMunch index files for repo and session metrics
-4. Pushes aggregated state to connected browsers via SSE
+3. Reads jCodeMunch, jDocMunch, and jDataMunch index files for repo, doc, and dataset metrics
+4. Pushes aggregated state to browsers via SSE, and exposes the same snapshot as JSON (`/api/stats`) and Prometheus metrics (`/metrics`)
 5. Serves a self-contained HTML/CSS/JS dashboard (no build step)
 
-The frontend uses vanilla JS with CSS custom properties for theming. Sparkline charts are drawn with inline SVG. No external dependencies beyond Flask.
+The frontend uses vanilla JS with CSS custom properties for theming. Sparkline charts are drawn with inline SVG. No external Python dependencies beyond Flask and python-dotenv.
 
 ## License
 
