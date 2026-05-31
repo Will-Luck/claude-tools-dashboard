@@ -758,11 +758,16 @@ class TestUsageFromHeadroom:
     """_usage_from_headroom() avoids a redundant call to /oauth/usage."""
 
     def _stats_with_window(self, fh_pct, sd_pct, sonnet_pct):
+        # Resets must stay in the future or collect_claude_usage's
+        # _scrub_stale_windows nulls the percentages. Compute them relative to
+        # now rather than hardcoding dates (which become a time-bomb the moment
+        # they pass).
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         return {
             "subscription_window": {
                 "latest": {
-                    "five_hour": {"utilization_pct": fh_pct, "resets_at": "2026-05-17T00:50:00Z"},
-                    "seven_day": {"utilization_pct": sd_pct, "resets_at": "2026-05-18T22:00:00Z"},
+                    "five_hour": {"utilization_pct": fh_pct, "resets_at": future},
+                    "seven_day": {"utilization_pct": sd_pct, "resets_at": future},
                     "seven_day_sonnet": {"utilization_pct": sonnet_pct, "resets_at": None},
                 }
             }
@@ -976,3 +981,113 @@ class TestWeeklySavingsClamp:
 
         result = app.collect_all()
         assert result["weekly"]["last_week"] == 0  # never the cached negative
+
+
+# ---------------------------------------------------------------------------
+# Atomic weekly-cache write (a crash mid-write must not corrupt weekly.json).
+# ---------------------------------------------------------------------------
+class TestWeeklyCacheAtomic:
+    def test_round_trip(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(app, "WEEKLY_CACHE_DIR", str(tmp_path))
+        data = {"current_week_baseline": 42, "last_week_savings": 7}
+        app._save_weekly_cache(data)
+        assert app._load_weekly_cache() == data
+
+    def test_no_temp_file_left_after_success(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(app, "WEEKLY_CACHE_DIR", str(tmp_path))
+        app._save_weekly_cache({"x": 1})
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+        assert leftovers == []
+
+    def test_existing_file_survives_failed_write(self, tmp_path, monkeypatch):
+        # json.dump raises while filling the temp file; os.replace never runs, so
+        # the previous good weekly.json is left intact rather than truncated.
+        monkeypatch.setattr(app, "WEEKLY_CACHE_DIR", str(tmp_path))
+        app._save_weekly_cache({"good": 1})
+
+        class Unserialisable:
+            pass
+
+        try:
+            app._save_weekly_cache({"bad": Unserialisable()})
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("expected json.dump to raise on unserialisable input")
+
+        assert app._load_weekly_cache() == {"good": 1}
+
+
+# ---------------------------------------------------------------------------
+# Prometheus /metrics exposition.
+# ---------------------------------------------------------------------------
+class TestRenderMetrics:
+    def _snap(self):
+        return {
+            "timestamp": "2026-05-30T12:00:00+00:00",
+            "combined_saved": 5_000_000,
+            "combined_saved_usd": 12.34,
+            "overall_health": "stale",
+            "rtk": {"total_saved": 100, "health": "ok", "active": True},
+            "jdatamunch": {"total_saved": 0, "health": "error", "active": False},
+            "claude_usage": {"active": True, "session_pct": 7.0, "weekly_pct": None, "sonnet_pct": 5},
+            "weekly": {"this_week": 200, "last_week": 0, "burn_rate_daily": 28.5},
+        }
+
+    def test_empty_snapshot_reports_down(self):
+        out = app._render_metrics({})
+        assert "ctd_up 0" in out
+        assert "ctd_combined_saved_tokens" not in out
+
+    def test_help_and_type_lines_present(self):
+        out = app._render_metrics(self._snap())
+        assert "# HELP ctd_combined_saved_tokens" in out
+        assert "# TYPE ctd_combined_saved_tokens gauge" in out
+
+    def test_core_values(self):
+        out = app._render_metrics(self._snap())
+        assert "ctd_up 1" in out
+        assert "ctd_combined_saved_tokens 5000000" in out
+        assert "ctd_combined_saved_usd 12.34" in out
+        assert "ctd_overall_health 1" in out  # stale -> 1
+
+    def test_per_tool_labels(self):
+        out = app._render_metrics(self._snap())
+        assert 'ctd_tool_saved_tokens{tool="rtk"} 100' in out
+        assert 'ctd_tool_health{tool="rtk"} 2' in out
+        assert 'ctd_tool_health{tool="jdatamunch"} 0' in out
+
+    def test_null_usage_window_omitted(self):
+        out = app._render_metrics(self._snap())
+        assert 'ctd_claude_usage_pct{window="session"} 7' in out
+        assert 'ctd_claude_usage_pct{window="sonnet"} 5' in out
+        assert 'window="weekly"' not in out  # weekly_pct was None
+
+    def test_zero_last_week_emitted_not_dropped(self):
+        out = app._render_metrics(self._snap())
+        assert 'ctd_weekly_saved_tokens{period="last_week"} 0' in out
+
+    def test_snapshot_timestamp_epoch(self):
+        out = app._render_metrics(self._snap())
+        assert "ctd_snapshot_timestamp_seconds 1780142400" in out
+
+    def test_route_returns_text_plain(self, monkeypatch):
+        class _Stub:
+            def snapshot(self):
+                return {"combined_saved": 9, "overall_health": "ok", "weekly": {}}
+
+        monkeypatch.setattr(app, "_collector", _Stub())
+        resp = app.app.test_client().get("/metrics")
+        assert resp.status_code == 200
+        assert resp.mimetype == "text/plain"
+        assert b"ctd_combined_saved_tokens 9" in resp.data
+
+    def test_route_empty_snapshot_still_200(self, monkeypatch):
+        class _Stub:
+            def snapshot(self):
+                return None
+
+        monkeypatch.setattr(app, "_collector", _Stub())
+        resp = app.app.test_client().get("/metrics")
+        assert resp.status_code == 200
+        assert b"ctd_up 0" in resp.data

@@ -33,6 +33,7 @@ JDOCMUNCH_BIN = os.environ.get("JDOCMUNCH_BIN", "jdocmunch-mcp")
 JDATAMUNCH_INDEX_DIR = os.environ.get("JDATAMUNCH_INDEX_DIR", os.path.join(HOME, ".data-index"))
 JDATAMUNCH_BIN = os.environ.get("JDATAMUNCH_BIN", "jdatamunch-mcp")
 PORT = int(os.environ.get("PORT", "8095"))
+HOST = os.environ.get("HOST", "0.0.0.0")  # bind address; set 127.0.0.1 to expose only behind a reverse proxy
 SSE_INTERVAL = int(os.environ.get("SSE_INTERVAL", "2"))
 COLLECTOR_INTERVAL = float(os.environ.get("COLLECTOR_INTERVAL", "0.25"))
 CLAUDE_CREDENTIALS = os.environ.get("CLAUDE_CREDENTIALS", os.path.join(HOME, ".claude", ".credentials.json"))
@@ -319,7 +320,6 @@ def collect_jcodemunch():
             total_tokens_saved = data.get("total_tokens_saved", 0)
 
         # Count .db files and sum sizes
-        index_dir = JCODEMUNCH_INDEX_DIR
         db_files = glob.glob(os.path.join(index_dir, "*.db"))
         repos_indexed = len(db_files)
         index_size_bytes = sum(os.path.getsize(f) for f in db_files if os.path.exists(f))
@@ -730,11 +730,21 @@ def _load_weekly_cache():
 
 
 def _save_weekly_cache(data):
-    """Save weekly savings snapshot to disk."""
+    """Save weekly savings snapshot to disk atomically.
+
+    Writes a temp file in the same directory then os.replace()s it onto
+    weekly.json. A crash or container stop mid-write can therefore never leave
+    a truncated file: _load_weekly_cache would discard a corrupt file and
+    return {}, silently resetting the weekly baseline and last-week total.
+    """
     os.makedirs(WEEKLY_CACHE_DIR, exist_ok=True)
     path = os.path.join(WEEKLY_CACHE_DIR, "weekly.json")
-    with open(path, "w") as f:
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def _group_history(entries):
@@ -1583,9 +1593,11 @@ body {
 
 <script>
 function formatTokens(n, withUnit) {
-    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    var neg = n < 0 ? '-' : '';
+    var a = Math.abs(n);
+    if (a >= 1e9) return neg + (a / 1e9).toFixed(1) + 'B';
+    if (a >= 1e6) return neg + (a / 1e6).toFixed(1) + 'M';
+    if (a >= 1e3) return neg + (a / 1e3).toFixed(1) + 'K';
     if (withUnit) return n + ' tokens';
     return String(n);
 }
@@ -1667,7 +1679,7 @@ function updateDashboard(d) {
     var w = d.weekly || {};
     var cu = d.claude_usage || {};
     document.getElementById('tk-this-week').textContent = w.week_is_fresh ? '--' : (w.this_week != null ? formatTokens(w.this_week, true) : '--');
-    document.getElementById('tk-last-week').textContent = w.last_week ? formatTokens(w.last_week, true) : '--';
+    document.getElementById('tk-last-week').textContent = w.last_week != null ? (w.last_week === 0 ? '0' : formatTokens(w.last_week, true)) : '--';
     document.getElementById('tk-burn').textContent = w.burn_rate_daily != null ? (w.burn_rate_daily === 0 ? '0' : formatTokens(w.burn_rate_daily, true)) : '--';
     document.getElementById('tk-reset').textContent = w.reset_display || '--';
 
@@ -1852,6 +1864,11 @@ function updateDashboard(d) {
 
     // Feed
     var feedEl = document.getElementById('feed');
+    // Pause the live rebuild while the user has scrolled down to read older
+    // entries. The feed is newest-first, so scrollTop near 0 means "viewing
+    // latest"; a full innerHTML replace each tick would otherwise snap them
+    // back to the top and they could never read history.
+    var feedPaused = feedEl && feedEl.scrollTop > 8;
     var hist = d.history || [];
     var lines = [];
     for (var j = 0; j < hist.length && j < 100; j++) {
@@ -1886,9 +1903,12 @@ function updateDashboard(d) {
             '</div>'
         );
     }
-    feedEl.innerHTML = lines.join('');
-
     var countEl = document.querySelector('.feed-count');
+    if (feedPaused) {
+        if (countEl) { countEl.textContent = 'paused: scroll up to resume'; }
+        return;
+    }
+    feedEl.innerHTML = lines.join('');
     if (countEl) {
         countEl.textContent = 'showing last ' + Math.min(hist.length, 100);
     }
@@ -1915,20 +1935,126 @@ updateClock();
 
 // SSE
 var source = new EventSource('/events');
+var lastMsgTs = Date.now();
+
+function setConnState(state, title) {
+    var dot = document.getElementById('health-pulse');
+    if (!dot) return;
+    dot.className = 'pulse-dot' + (state !== 'ok' ? ' health-' + state : '');
+    dot.title = title;
+}
+
 source.onmessage = function(e) {
+    lastMsgTs = Date.now();
     try {
         var d = JSON.parse(e.data);
-        updateDashboard(d);
+        updateDashboard(d);   // resets the pulse-dot from overall_health, clearing any disconnect state
     } catch (err) {
         console.error('SSE parse error:', err);
     }
 };
 source.onerror = function() {
     console.debug('SSE connection lost, will retry...');
+    setConnState('error', 'Live feed disconnected, reconnecting');
 };
+
+// Staleness watchdog: flag a frozen board even when the connection stays open
+// but no message has arrived for several push intervals.
+setInterval(function() {
+    var age = Date.now() - lastMsgTs;
+    if (age > 15000) {
+        setConnState('error', 'Live feed stale: no update for ' + Math.round(age / 1000) + 's');
+    }
+}, 5000);
 </script>
 </body>
 </html>"""
+
+
+# --- Prometheus metrics ---
+
+_PROM_TOOLS = ("rtk", "headroom", "jcodemunch", "jdocmunch", "jdatamunch")
+_HEALTH_VALUE = {"ok": 2, "stale": 1, "error": 0}
+
+
+def _num(v):
+    """Format a number for Prometheus exposition (ints stay ints, bools -> 0/1)."""
+    if isinstance(v, bool):
+        return "1" if v else "0"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _render_metrics(snap):
+    """Render a collect_all() snapshot as Prometheus text exposition (v0.0.4).
+
+    Pure function so it can be unit-tested without a live collector. Emits
+    ctd_up=0 for an empty snapshot (board not yet ticked, or collector dead) so
+    a scrape still distinguishes 'no data' from 'target down'.
+    """
+    lines = []
+
+    def block(name, help_text):
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} gauge")
+
+    if not snap:
+        block("ctd_up", "Dashboard liveness (1 = a collector snapshot is available).")
+        lines.append("ctd_up 0")
+        return "\n".join(lines) + "\n"
+
+    block("ctd_up", "Dashboard liveness (1 = a collector snapshot is available).")
+    lines.append("ctd_up 1")
+
+    block("ctd_combined_saved_tokens", "Combined lifetime tokens saved across all tools.")
+    lines.append(f"ctd_combined_saved_tokens {_num(snap.get('combined_saved', 0))}")
+
+    block("ctd_combined_saved_usd", "Combined lifetime US dollar savings (Headroom-attributed).")
+    lines.append(f"ctd_combined_saved_usd {_num(snap.get('combined_saved_usd', 0))}")
+
+    block("ctd_overall_health", "Worst-of rollup of per-tool health (2=ok, 1=stale, 0=error).")
+    lines.append(f"ctd_overall_health {_HEALTH_VALUE.get(snap.get('overall_health'), 0)}")
+
+    block("ctd_tool_saved_tokens", "Lifetime tokens saved, per tool.")
+    for tool in _PROM_TOOLS:
+        td = snap.get(tool)
+        if isinstance(td, dict):
+            lines.append(f'ctd_tool_saved_tokens{{tool="{tool}"}} {_num(td.get("total_saved", 0))}')
+
+    block("ctd_tool_health", "Per-tool collector health (2=ok, 1=stale, 0=error).")
+    for tool in _PROM_TOOLS:
+        td = snap.get(tool)
+        if isinstance(td, dict):
+            lines.append(f'ctd_tool_health{{tool="{tool}"}} {_HEALTH_VALUE.get(td.get("health"), 0)}')
+
+    usage = snap.get("claude_usage") or {}
+    live = [(w, usage.get(k)) for w, k in
+            (("session", "session_pct"), ("weekly", "weekly_pct"), ("sonnet", "sonnet_pct"))
+            if usage.get(k) is not None]
+    if live:
+        block("ctd_claude_usage_pct", "Claude subscription window utilisation percentage.")
+        for w, v in live:
+            lines.append(f'ctd_claude_usage_pct{{window="{w}"}} {_num(v)}')
+
+    weekly = snap.get("weekly") or {}
+    block("ctd_weekly_saved_tokens", "Tokens saved this/last rolling week.")
+    lines.append(f'ctd_weekly_saved_tokens{{period="this_week"}} {_num(weekly.get("this_week", 0))}')
+    lines.append(f'ctd_weekly_saved_tokens{{period="last_week"}} {_num(weekly.get("last_week", 0))}')
+
+    block("ctd_burn_rate_daily_tokens", "Average tokens saved per day this week.")
+    lines.append(f"ctd_burn_rate_daily_tokens {_num(weekly.get('burn_rate_daily', 0))}")
+
+    ts = snap.get("timestamp")
+    if ts:
+        try:
+            epoch = datetime.fromisoformat(ts).timestamp()
+            block("ctd_snapshot_timestamp_seconds", "Unix time the current snapshot was produced.")
+            lines.append(f"ctd_snapshot_timestamp_seconds {_num(round(epoch, 3))}")
+        except (ValueError, TypeError):
+            pass
+
+    return "\n".join(lines) + "\n"
 
 
 # --- Routes ---
@@ -1955,6 +2081,18 @@ def api_stats():
     return jsonify(payload)
 
 
+@app.route("/metrics")
+def metrics():
+    """Prometheus text exposition of the current snapshot. No extra deps.
+
+    Lets a homelab monitoring stack scrape token savings, per-tool health,
+    Claude usage windows, and snapshot freshness without holding an SSE
+    connection open or re-parsing the /api/stats JSON.
+    """
+    body = _render_metrics(_collector.snapshot() or {})
+    return Response(body, mimetype="text/plain; version=0.0.4; charset=utf-8")
+
+
 @app.route("/events")
 def events():
     def stream():
@@ -1974,4 +2112,4 @@ def events():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
+    app.run(host=HOST, port=PORT, debug=False, threaded=True)
